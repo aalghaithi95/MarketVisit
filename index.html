@@ -454,7 +454,7 @@ var SITES = [], CUSTOMERS = [], sitesByCust = {};
 var YEARS = [], NY = 0, LASTM = 11;
 var F = null;            /* {s,i,p,v,q} typed arrays — the whole dataset, in memory */
 var loadedAt = null;
-var DATA_VERSION = 4;
+var DATA_VERSION = 5;
 
 /* ---------- gviz over JSONP (no CORS, works from a static page) ---------- */
 var gvSeq = 0;
@@ -489,7 +489,7 @@ function gviz(query, ok, fail){
   document.head.appendChild(s);
 }
 function cell(r, i){ var c = r.c && r.c[i]; return (c && c.v !== null && c.v !== undefined) ? c.v : null; }
-function num(v){ return typeof v === 'number' ? v : (parseFloat(String(v).replace(/,/g,'')) || 0); }
+function num(v){ return typeof v === 'number' ? v : cnum(v); }
 
 var COL = {dep:'A', item:'D', cust:'G', code:'K', site:'L', chan:'N', yr:'O', mnth:'P', sales:'Q', cases:'R'};
 
@@ -583,6 +583,26 @@ Buckets.prototype.add = function(k, v, q){
   this.v[slot] += v; this.q[slot] += q;
 };
 
+/* Numbers arrive formatted the way the sheet displays them: "1,234.5", sometimes
+   "(1,234.5)" for negatives. parseFloat stops at the comma and would silently
+   return 1, so every separator has to come out first. */
+function cnum(t){
+  if (t === undefined || t === null) return 0;
+  t = String(t).trim();
+  if (!t || t === '-' || t === '–') return 0;
+  var neg = false;
+  if (t.charAt(0) === '(' && t.charAt(t.length-1) === ')'){ neg = true; t = t.slice(1,-1); }
+  t = t.replace(/[,\s\u00A0'’]/g, '');
+  if (t.charAt(0) === '-'){ neg = true; t = t.slice(1); }
+  var v = parseFloat(t);
+  if (isNaN(v)) return 0;
+  return neg ? -v : v;
+}
+function cint(t){
+  var v = cnum(t);
+  return v === 0 && String(t).replace(/[^0-9]/g,'') === '' ? NaN : Math.round(v);
+}
+
 /* split one CSV line; fast path for the common case with no quotes */
 function splitCsv(line){
   if (line.indexOf('"') < 0) return line.split(',');
@@ -615,9 +635,9 @@ function loadAll(progress, ok, fail){
 
     /* register the outlet from any CPD row, so a store that has only ever bought
        off-list items still appears and can be audited */
-    var code = f[C_CODE].trim();
+    var code = f[C_CODE].replace(/[,\s\u00A0]/g, '');
     var si = codeIdx[code];
-    var yy = parseInt(f[C_YR], 10), mm = MI[f[C_MNTH].trim().slice(0,3).toLowerCase()];
+    var yy = cint(f[C_YR]), mm = MI[f[C_MNTH].trim().slice(0,3).toLowerCase()];
     var abs = (isNaN(yy) || mm === undefined) ? -1 : yy*12 + mm;
     if (si === undefined){
       si = sites.length;
@@ -635,11 +655,11 @@ function loadAll(progress, ok, fail){
       if (ch && ch !== sites[si][3]) sites[si][3] = ch;
     }
 
-    var ii = imap[parseInt(f[C_ITEM], 10)];
+    var ii = imap[cint(f[C_ITEM])];
     if (ii === undefined){ badItems++; return; }        /* not on the master item list */
     if (abs < 0) return;
     var m = mm, y = yy;
-    var v = parseFloat(f[C_SALES]) || 0, q = parseFloat(f[C_CASES]) || 0;
+    var v = cnum(f[C_SALES]), q = cnum(f[C_CASES]);
     if (!v && !q) return;
     yearSeen[y] = 1;
     rows++;
