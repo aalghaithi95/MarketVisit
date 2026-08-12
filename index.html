@@ -106,13 +106,23 @@ td.chkc{text-align:center;padding:4px 6px}
 tr.missing td.desc{color:var(--neg)}
 tr.missing td.chkc .chk{border-color:#E2B7AE}
 
-/* ---------- print report ---------- */
+/* ---------- report overlay + print ---------- */
 #reportWrap{display:none}
+body.reporting{overflow:hidden}
+body.reporting>*{display:none!important}
+body.reporting>#reportWrap{display:block!important;position:fixed;inset:0;z-index:900;
+  background:#fff;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  padding:0 16px calc(30px + env(safe-area-inset-bottom))}
+.rep-tools{position:sticky;top:0;z-index:5;background:#fff;border-bottom:1px solid var(--line);
+  padding:10px 0;display:flex;gap:8px;align-items:center;margin-bottom:4px}
+.rep-tools .hint{font-size:11px;color:var(--muted);margin-left:auto;text-align:right}
 @media print{
-  body>*{display:none!important}
   body{background:#fff}
-  #reportWrap{display:block!important}
-  @page{margin:14mm}
+  body.reporting{overflow:visible}
+  body.reporting>*{display:none!important}
+  body.reporting>#reportWrap{display:block!important;position:static;overflow:visible;padding:0;background:#fff}
+  .rep-tools{display:none!important}
+  @page{margin:12mm}
 }
 .rep{font-family:'Archivo',sans-serif;color:#000;font-size:11px}
 .rep h1{font-size:17px;margin:0 0 2px}
@@ -211,23 +221,24 @@ tr.ok td.desc{color:var(--pos)}
   #tbl tbody tr.stopped{border-left-color:var(--accent)}
 
   /* line 1 — tick + item.  line 2 — the three numbers that matter in-store */
-  td.chkc{grid-column:1;grid-row:1/span 2;align-self:center;text-align:left}
+  #tbl tbody td.chkc{grid-column:1;grid-row:1/span 2;align-self:center;text-align:left}
   #tbl .chk{width:38px;height:38px;font-size:19px;border-width:2px}
-  td.desc{grid-column:2/5;grid-row:1;white-space:normal;max-width:none;
+  #tbl tbody td.desc{grid-column:2/5;grid-row:1;white-space:normal;max-width:none;
     font-size:13px;font-weight:600;line-height:1.2}
-  td.d-q26{grid-column:2;grid-row:2}
-  td.d-avg{grid-column:3;grid-row:2}
-  td.d-last{grid-column:4;grid-row:2}
-  td.c-type,td.c-cat,td.c-code,
-  td.d-q25,td.d-dq,td.d-v25,td.d-v26,td.d-dv,td.d-delta{display:none}
+  #tbl tbody td.d-q26{grid-column:2;grid-row:2}
+  #tbl tbody td.d-avg{grid-column:3;grid-row:2}
+  #tbl tbody td.d-last{grid-column:4;grid-row:2}
+  #tbl tbody td.c-type,#tbl tbody td.c-cat,#tbl tbody td.c-code,
+  #tbl tbody td.d-q25,#tbl tbody td.d-dq,#tbl tbody td.d-v25,
+  #tbl tbody td.d-v26,#tbl tbody td.d-dv,#tbl tbody td.d-delta{display:none!important}
   #tbl tbody td.num{text-align:left}
   #tbl tbody td[data-l]{margin-top:2px;font-size:12.5px}
   #tbl tbody td[data-l]::before{content:attr(data-l);display:block;
     font-family:'IBM Plex Mono',monospace;font-size:7.5px;letter-spacing:.1em;
     text-transform:uppercase;color:var(--muted);margin-bottom:0}
-  tr.promorow td.desc::after{content:' · PROMO';font-family:'IBM Plex Mono',monospace;
+  #tbl tbody tr.promorow td.desc::after{content:' · PROMO';font-family:'IBM Plex Mono',monospace;
     font-size:9px;letter-spacing:.1em;color:var(--accent-2)}
-  tr.promorow td.chkc{color:#C3CFCA}
+  #tbl tbody tr.promorow td.chkc{color:#C3CFCA}
   #tbl tbody tr.cat{display:block;position:static;background:var(--ink);color:#fff;
     border:none;border-radius:3px;margin:13px 0 6px;padding:7px 10px}
   #tbl tbody tr.cat td{display:none}
@@ -765,6 +776,11 @@ document.getElementById('pdf').addEventListener('click', function(){
       '<td class="n">'+(A.v25[i]?nf0.format(Math.round(A.v25[i])):'—')+'</td></tr>';
   }).join('');
   document.getElementById('report').innerHTML =
+    '<div class="rep-tools">'+
+      '<button class="btn ghost" id="repClose" type="button">Close</button>'+
+      '<button class="btn" id="repPrint" type="button">Save as PDF</button>'+
+      '<span class="hint">Print sheet → Save to Files or Share</span>'+
+    '</div>'+
     '<div class="sub">Delicio · Oman · CPD</div><h1>Store availability check — missing items</h1>'+
     '<div class="meta">'+
       '<div><span>Customer / site</span>'+esc(scopeNames())+'</div>'+
@@ -784,10 +800,21 @@ document.getElementById('pdf').addEventListener('click', function(){
     'Last supplied is the most recent month the item shipped to this customer / site. Promotional packs are excluded from the check, '+
     'and the data covers CPD only \u2014 Food Service (FSD) is out of scope. '+
     'Values cover '+periodLabel()+'.</div>';
-  var t = document.title;
-  document.title = 'Delicio missing items — ' + siteScopeLabel() + ' — ' + stamp;
-  window.print();
-  setTimeout(function(){ document.title = t; }, 800);
+  document.body.classList.add('reporting');
+  document.getElementById('reportWrap').scrollTop = 0;
+  try { window.scrollTo(0,0); } catch(e){}
+  docTitle = docTitle || document.title;
+  document.title = 'Delicio missing items - ' + siteScopeLabel() + ' - ' + stamp;
+  document.getElementById('repClose').addEventListener('click', closeReport);
+  document.getElementById('repPrint').addEventListener('click', function(){ window.print(); });
+});
+var docTitle = '';
+function closeReport(){
+  document.body.classList.remove('reporting');
+  if (docTitle) document.title = docTitle;
+}
+window.addEventListener('keydown', function(e){
+  if (e.key === 'Escape' && document.body.classList.contains('reporting')) closeReport();
 });
 function scopeNames(){
   if (state.site.size){
