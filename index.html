@@ -298,6 +298,10 @@ tr.ok td.desc{color:var(--pos)}
   .yrsel select{flex:1}
 }
 
+.loading .bar2.determinate i{animation:none;transition:width .25s ease}
+.loading .loadnote{font-size:11px;color:var(--muted);max-width:300px;text-align:center}
+.loading p{color:var(--text)}
+
 </style>
 </head>
 <body>
@@ -425,7 +429,7 @@ tr.ok td.desc{color:var(--pos)}
 <script>
 (function(){
 'use strict';
-/* ================= live data from the Google Sheet ================= */
+/* ================= data: loaded once, then everything is local ================= */
 var SHEET_ID = '18OgjljLCRT6An6h3mvObwo61FKvezXjCRX92CjFMuqA';
 var SHEET_TAB = 'Data Dump';
 var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -444,9 +448,10 @@ var NI = ITEMS.length, imap = {}, CATS = [], catOf = new Int32Array(NI);
 })();
 
 var SITES = [], CUSTOMERS = [], sitesByCust = {};
-var YEARS = [], NY = 0, LASTM = 11;   /* last month with data in the newest year */
-var FACTS = null;                     /* facts for the scope currently on screen */
-var lastFetched = null;
+var YEARS = [], NY = 0, LASTM = 11;
+var F = null;            /* {s,i,p,v,q} typed arrays — the whole dataset, in memory */
+var loadedAt = null;
+var DATA_VERSION = 3;
 
 /* ---------- gviz over JSONP (no CORS, works from a static page) ---------- */
 var gvSeq = 0;
@@ -458,8 +463,8 @@ function gviz(query, ok, fail){
   }
   var timer = setTimeout(function(){
     if (done) return; done = true; cleanup();
-    fail('The sheet did not respond. Check the connection and try again.');
-  }, 45000);
+    fail('The sheet did not respond in time. Check the connection and try again.');
+  }, 180000);
   window[name] = function(resp){
     if (done) return; done = true; clearTimeout(timer); cleanup();
     if (!resp || resp.status === 'error'){
@@ -481,92 +486,171 @@ function gviz(query, ok, fail){
   document.head.appendChild(s);
 }
 function cell(r, i){ var c = r.c && r.c[i]; return (c && c.v !== null && c.v !== undefined) ? c.v : null; }
-function qEsc(v){ return String(v).replace(/'/g, "''"); }
+function num(v){ return typeof v === 'number' ? v : (parseFloat(String(v).replace(/,/g,'')) || 0); }
 
-/* ---------- small cache so a store you loaded once still opens offline ---------- */
-var mem = {};
-function cacheGet(key){
-  if (mem[key]) return mem[key];
+var COL = {dep:'A', item:'D', cust:'G', code:'K', site:'L', chan:'N', yr:'O', mnth:'P', sales:'Q', cases:'R'};
+
+/* ---------- on-device snapshot (IndexedDB; localStorage is far too small) ---------- */
+var IDB_NAME = 'delicio-oman', IDB_STORE = 'snapshot';
+function idbOpen(cb){
   try {
-    var raw = window.localStorage.getItem('delicio.data.' + key);
-    if (raw){ var o = JSON.parse(raw); mem[key] = o; return o; }
-  } catch(e){}
-  return null;
+    if (!window.indexedDB) return cb(null);
+    var rq = window.indexedDB.open(IDB_NAME, 1);
+    rq.onupgradeneeded = function(){ rq.result.createObjectStore(IDB_STORE); };
+    rq.onsuccess = function(){ cb(rq.result); };
+    rq.onerror = function(){ cb(null); };
+  } catch(e){ cb(null); }
 }
-function cacheSet(key, obj){
-  mem[key] = obj;
-  try { window.localStorage.setItem('delicio.data.' + key, JSON.stringify(obj)); } catch(e){}
+function snapshotSave(obj){
+  idbOpen(function(db){
+    if (!db) return;
+    try { db.transaction(IDB_STORE, 'readwrite').objectStore(IDB_STORE).put(obj, 'all'); } catch(e){}
+  });
+}
+function snapshotLoad(cb){
+  idbOpen(function(db){
+    if (!db) return cb(null);
+    try {
+      var rq = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get('all');
+      rq.onsuccess = function(){ var o = rq.result; cb(o && o.version === DATA_VERSION ? o : null); };
+      rq.onerror = function(){ cb(null); };
+    } catch(e){ cb(null); }
+  });
+}
+function snapshotClear(cb){
+  idbOpen(function(db){
+    if (!db) return cb();
+    try { db.transaction(IDB_STORE,'readwrite').objectStore(IDB_STORE).delete('all'); } catch(e){}
+    cb();
+  });
 }
 
-/* ---------- queries ---------- */
-var COL = {dep:'A', item:'D', cust:'G', site:'L', chan:'N', yr:'O', mnth:'P', sales:'Q', cases:'R'};
-
-function loadSites(ok, fail){
-  var cached = cacheGet('sites');
-  if (cached){ applySites(cached); ok(true); }
-  gviz("select " + COL.cust + ", " + COL.site + ", " + COL.chan + ", count(" + COL.item + ") " +
-       "where " + COL.dep + " = 'CPD' group by " + COL.cust + ", " + COL.site + ", " + COL.chan,
-    function(t){
-      var rows = [];
-      t.rows.forEach(function(r){
-        var c = cell(r,0), s = cell(r,1);
-        if (c === null || s === null) return;
-        rows.push([String(c).trim(), String(s).trim(), String(cell(r,2) || '').trim()]);
-      });
-      if (!rows.length){ if (!cached) fail('The sheet returned no CPD rows.'); return; }
-      cacheSet('sites', rows);
-      applySites(rows);
-      ok(false);
-    },
-    function(msg){ if (!cached) fail(msg); else ok(true); });
-}
-function applySites(rows){
-  SITES = rows; CUSTOMERS = []; sitesByCust = {};
+function applySnapshot(snap){
+  SITES = snap.sites; YEARS = snap.years.slice(); NY = YEARS.length;
+  F = snap.f; loadedAt = snap.at;
+  CUSTOMERS = []; sitesByCust = {};
   var seen = {};
-  rows.forEach(function(r, i){
+  SITES.forEach(function(r, i){
     if (seen[r[0]] === undefined){ seen[r[0]] = CUSTOMERS.length; CUSTOMERS.push(r[0]); }
-    var cid = seen[r[0]];
-    r[3] = cid;
-    (sitesByCust[cid] = sitesByCust[cid] || []).push(i);
+    r[4] = seen[r[0]];
+    (sitesByCust[r[4]] = sitesByCust[r[4]] || []).push(i);
   });
+  LASTM = 0;
+  var lastYearIdx = NY - 1;
+  for (var k=0;k<F.p.length;k++){
+    var p = F.p[k];
+    if (Math.floor(p/12) === lastYearIdx && (p%12) > LASTM) LASTM = p%12;
+  }
 }
 
-/* facts: [itemIndex, yearIndex, month, value, qty] for one scope */
-function factsQuery(where){
-  return "select " + COL.item + ", " + COL.yr + ", " + COL.mnth + ", sum(" + COL.sales + "), sum(" + COL.cases + ") " +
-         "where " + COL.dep + " = 'CPD'" + (where ? " and " + where : "") +
-         " group by " + COL.item + ", " + COL.yr + ", " + COL.mnth;
+/* ---------- the one and only load ---------- */
+function loadAll(progress, ok, fail){
+  var sites = null, years = null, perYear = [], step = 1;
+  progress('Reading the sheet…', 0.02);
+
+  gviz("select " + COL.yr + ", count(" + COL.item + ") where " + COL.dep + " = 'CPD' group by " + COL.yr,
+    function(t){
+      years = [];
+      t.rows.forEach(function(r){ var y = cell(r,0); if (y !== null) years.push(parseInt(y,10)); });
+      years = years.filter(function(y){ return !isNaN(y); }).sort(function(a,b){ return a-b; });
+      if (!years.length) return fail('No CPD rows found in the sheet.');
+      loadSites();
+    }, fail);
+
+  function loadSites(){
+    progress('Loading outlets…', 0.08);
+    gviz("select " + COL.cust + ", " + COL.site + ", " + COL.code + ", " + COL.chan + ", count(" + COL.item + ") " +
+         "where " + COL.dep + " = 'CPD' group by " + COL.cust + ", " + COL.site + ", " + COL.code + ", " + COL.chan,
+      function(t){
+        sites = [];
+        t.rows.forEach(function(r){
+          var c = cell(r,0), s = cell(r,1), k = cell(r,2);
+          if (c === null || s === null || k === null) return;
+          sites.push([String(c).trim(), String(s).trim(), String(k).trim(), String(cell(r,3)||'').trim(), 0]);
+        });
+        if (!sites.length) return fail('The sheet returned no outlets.');
+        nextYear();
+      }, fail);
+  }
+
+  /* one query per year: smaller responses, and a progress bar that means something */
+  function nextYear(){
+    if (step > years.length) return finish();
+    var y = years[step - 1];
+    progress('Loading ' + y + ' — year ' + step + ' of ' + years.length + '…',
+             0.1 + 0.85 * ((step-1)/years.length));
+    gviz("select " + COL.code + ", " + COL.item + ", " + COL.mnth + ", sum(" + COL.sales + "), sum(" + COL.cases + ") " +
+         "where " + COL.dep + " = 'CPD' and " + COL.yr + " = " + y +
+         " group by " + COL.code + ", " + COL.item + ", " + COL.mnth,
+      function(t){ perYear.push({y:y, rows:t.rows}); step++; nextYear(); }, fail);
+  }
+
+  function finish(){
+    progress('Preparing the dashboard…', 0.97);
+    var codeIdx = {};
+    sites.forEach(function(r,i){ codeIdx[r[2]] = i; });
+    var yIndex = {};
+    years.forEach(function(y,i){ yIndex[y] = i; });
+
+    var total = 0;
+    perYear.forEach(function(b){ total += b.rows.length; });
+    var s = new Int32Array(total), it = new Int32Array(total), p = new Int32Array(total),
+        v = new Float64Array(total), q = new Float64Array(total), n = 0;
+
+    perYear.forEach(function(b){
+      var yi = yIndex[b.y];
+      b.rows.forEach(function(r){
+        var code = cell(r,0), item = cell(r,1), m = cell(r,2);
+        if (code === null || item === null || m === null) return;
+        var si = codeIdx[String(code).trim()];
+        if (si === undefined) return;
+        var ii = imap[typeof item === 'number' ? item : parseInt(String(item).replace(/\D/g,''),10)];
+        if (ii === undefined) return;                    /* not on the master item list */
+        var mi = MI[String(m).trim().slice(0,3).toLowerCase()];
+        if (mi === undefined) return;
+        var val = num(cell(r,3)), qty = num(cell(r,4));
+        if (!val && !qty) return;
+        s[n] = si; it[n] = ii; p[n] = yi*12 + mi; v[n] = val; q[n] = qty; n++;
+      });
+    });
+    perYear = null;
+    var snap = {
+      version: DATA_VERSION,
+      at: new Date().toISOString(),
+      years: years,
+      sites: sites,
+      f: {s:s.slice(0,n), i:it.slice(0,n), p:p.slice(0,n), v:v.slice(0,n), q:q.slice(0,n)}
+    };
+    applySnapshot(snap);
+    snapshotSave(snap);
+    ok();
+  }
 }
-function parseFacts(t){
-  var out = [], yrs = {};
-  t.rows.forEach(function(r){
-    var code = cell(r,0), y = cell(r,1), m = cell(r,2);
-    if (code === null || y === null || m === null) return;
-    var ii = imap[typeof code === 'number' ? code : parseInt(String(code).replace(/\D/g,''),10)];
-    if (ii === undefined) return;                       /* not on the master item list */
-    var mi = MI[String(m).trim().slice(0,3).toLowerCase()];
-    if (mi === undefined) return;
-    var yy = parseInt(y,10); yrs[yy] = 1;
-    out.push([ii, yy, mi, +cell(r,3) || 0, +cell(r,4) || 0]);
+
+/* ---------- scope: pure client-side masking, never a network call ---------- */
+var mask = null;
+function scopeSites(){
+  if (!state.cust.size){ var all = []; for (var i=0;i<SITES.length;i++) all.push(i); return all; }
+  var out = [];
+  state.cust.forEach(function(cid){
+    var arr = sitesByCust[cid] || [];
+    for (var j=0;j<arr.length;j++) out.push(arr[j]);
   });
-  return {rows:out, years:Object.keys(yrs).map(Number)};
+  return out;
 }
-function scopeWhere(){
+function buildMask(){
+  if (!mask || mask.length !== SITES.length) mask = new Uint8Array(SITES.length);
+  mask.fill(0);
+  var scope = scopeSites();
   if (state.site.size){
-    var names = [];
-    state.site.forEach(function(i){ names.push("'" + qEsc(SITES[i][1]) + "'"); });
-    return COL.site + " in (" + names.join(',') + ")";
+    for (var i=0;i<scope.length;i++) if (state.site.has(scope[i])) mask[scope[i]] = 1;
+  } else {
+    for (var k=0;k<scope.length;k++) mask[scope[k]] = 1;
   }
-  if (state.cust.size){
-    var cs = [];
-    state.cust.forEach(function(i){ cs.push("'" + qEsc(CUSTOMERS[i]) + "'"); });
-    return COL.cust + " in (" + cs.join(',') + ")";
-  }
-  return '';
 }
 function scopeKey(){
   if (state.site.size){
-    var a = []; state.site.forEach(function(i){ a.push(SITES[i][1]); });
+    var a = []; state.site.forEach(function(i){ a.push(SITES[i][2]); });
     return 'S|' + a.sort().join('~');
   }
   if (state.cust.size){
@@ -575,48 +659,9 @@ function scopeKey(){
   }
   return 'ALL';
 }
-
-function setYears(list){
-  var all = {};
-  YEARS.forEach(function(y){ all[y] = 1; });
-  list.forEach(function(y){ all[y] = 1; });
-  YEARS = Object.keys(all).map(Number).sort(function(a,b){ return a-b; });
-  NY = YEARS.length;
-}
 function yIdx(y){ return YEARS.indexOf(y); }
 
-/* ---------- load the facts for the current scope ---------- */
-var loadSeq = 0;
-function loadScope(done){
-  var key = scopeKey(), mine = ++loadSeq;
-  var cached = cacheGet('f|' + key);
-  if (cached){
-    setYears(cached.years);
-    FACTS = cached.rows;
-    lastFetched = cached.at || lastFetched;
-    done(true);
-  } else {
-    setStatus('loading', 'Loading ' + siteScopeLabel() + ' from the sheet…');
-  }
-  gviz(factsQuery(scopeWhere()),
-    function(t){
-      if (mine !== loadSeq) return;                     /* a newer selection won */
-      var p = parseFacts(t);
-      p.at = new Date().toISOString();
-      cacheSet('f|' + key, p);
-      setYears(p.years);
-      FACTS = p.rows; lastFetched = p.at;
-      setStatus('ok', '');
-      done(false);
-    },
-    function(msg){
-      if (mine !== loadSeq) return;
-      if (cached) setStatus('stale', 'Showing the last saved copy — ' + msg);
-      else { setStatus('error', msg); FACTS = []; done(false); }
-    });
-}
-
-/* ================= aggregation ================= */
+/* ================= aggregation — runs over the in-memory dataset ================= */
 var A = null;
 function ensureA(){
   var need = NI * NY * 12;
@@ -624,45 +669,44 @@ function ensureA(){
     A = {
       qA:new Float64Array(NI), vA:new Float64Array(NI),
       qB:new Float64Array(NI), vB:new Float64Array(NI),
-      last:new Int32Array(NI), lastA:new Int32Array(NI),
+      last:new Int32Array(NI),
       mq:new Float64Array(need), mv:new Float64Array(need)
     };
   }
 }
 function aggregate(){
   ensureA();
+  buildMask();
   A.qA.fill(0); A.vA.fill(0); A.qB.fill(0); A.vB.fill(0);
   A.mq.fill(0); A.mv.fill(0);
   var ia = yIdx(state.yrA), ib = yIdx(state.yrB), m1 = state.m1, m2 = state.m2;
-  var f = FACTS || [];
-  for (var k=0;k<f.length;k++){
-    var r = f[k], it = r[0], yi = yIdx(r[1]), m = r[2];
-    if (yi < 0) continue;
-    var p = (it*NY + yi)*12 + m;
-    A.mv[p] += r[3]; A.mq[p] += r[4];
+  var fs = F.s, fi = F.i, fp = F.p, fv = F.v, fq = F.q, n = fs.length;
+  for (var k=0;k<n;k++){
+    if (!mask[fs[k]]) continue;
+    var it = fi[k], p = fp[k], yi = (p/12)|0, m = p%12;
+    var g = it*NY*12 + p;
+    A.mv[g] += fv[k]; A.mq[g] += fq[k];
     if (m >= m1 && m <= m2){
-      if (yi === ia){ A.vA[it] += r[3]; A.qA[it] += r[4]; }
-      else if (yi === ib){ A.vB[it] += r[3]; A.qB[it] += r[4]; }
+      if (yi === ia){ A.vA[it] += fv[k]; A.qA[it] += fq[k]; }
+      else if (yi === ib){ A.vB[it] += fv[k]; A.qB[it] += fq[k]; }
     }
   }
   /* Last supply = the most recent month anywhere in the data with a net POSITIVE
-     shipment. The selected period does not narrow it, and a month that nets out
+     shipment. The selected period never narrows it, and a month that nets out
      negative is a return, so we step back past it. -1 = never supplied here. */
+  var span = NY*12;
   for (var i=0;i<NI;i++){
-    var base = i*NY*12, L = -1, LA = -1;
-    for (var pp=0;pp<NY*12;pp++){
+    var base = i*span, L = -1;
+    for (var pp=0;pp<span;pp++){
       var q = A.mq[base+pp], v = A.mv[base+pp];
-      if (q > 0 || (q === 0 && v > 0)){
-        L = pp;
-        if (Math.floor(pp/12) === yIdx(state.yrA)) LA = pp;
-      }
+      if (q > 0 || (q === 0 && v > 0)) L = pp;
     }
-    A.last[i] = L; A.lastA[i] = LA;
+    A.last[i] = L;
   }
 }
 function periodOf(p){ return {year: YEARS[Math.floor(p/12)], month: p%12}; }
 function monthsB(){
-  var n = 0, ib = yIdx(state.yrB), latest = (state.yrB === YEARS[NY-1]) ? LASTM : 11;
+  var n = 0, latest = (state.yrB === YEARS[NY-1]) ? LASTM : 11;
   for (var m=state.m1;m<=state.m2;m++) if (m <= latest) n++;
   return n || 1;
 }
@@ -898,10 +942,10 @@ function setStatus(kind, msg){
   var el = document.getElementById('status');
   if (!el) return;
   el.className = 'status ' + kind;
-  var when = lastFetched ? new Date(lastFetched) : null;
+  var when = loadedAt ? new Date(loadedAt) : null;
   var stamp = when ? when.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : '';
   var base = kind === 'ok'
-    ? 'Live from the Google Sheet' + (stamp ? ' · loaded ' + stamp : '')
+    ? 'All data loaded — filtering runs on this device' + (stamp ? ' · from the sheet ' + stamp : '')
     : (msg || '');
   document.getElementById('statusMsg').textContent = base;
 }
@@ -1344,7 +1388,7 @@ function buildSelectors(){
 }
 function reload(){
   loadChecks();
-  loadScope(function(){ render(); });
+  render();            /* everything is already in memory — no network */
 }
 
 /* ---------- period + years ---------- */
@@ -1436,23 +1480,20 @@ document.getElementById('reset').addEventListener('click', function(){
   document.getElementById('m1').value = 0; document.getElementById('m2').value = LASTM;
   document.getElementById('catSel').value = '';
   state.onlyUnchecked = false; document.getElementById('onlyUn').checked = false;
-  msCust.refresh(); msSite.refresh(); syncPresets(); reload();
+  msCust.refresh(); msSite.refresh(); syncPresets(); loadChecks(); render();
 });
 document.getElementById('refreshBtn').addEventListener('click', function(){
-  try {
-    var keys = [];
-    for (var i=0;i<window.localStorage.length;i++){
-      var k = window.localStorage.key(i);
-      if (k && k.indexOf('delicio.data.') === 0) keys.push(k);
-    }
-    keys.forEach(function(k){ window.localStorage.removeItem(k); });
-  } catch(e){}
-  mem = {};
-  setStatus('loading', 'Refreshing from the sheet…');
-  loadSites(function(){
-    msCust.refresh(); msSite.refresh();
-    loadScope(function(){ render(); });
-  }, function(msg){ setStatus('error', msg); });
+  if (!window.confirm('Reload everything from the Google Sheet? Your ticks are kept.')) return;
+  showLoader('Refreshing from the sheet…');
+  snapshotClear(function(){
+    loadAll(setProgress, function(){
+      afterLoad(true);
+      hideLoader();
+    }, function(msg){
+      hideLoader();
+      setStatus('error', msg + ' Showing the copy already on this device.');
+    });
+  });
 });
 
 /* ---------- CSV ---------- */
@@ -1481,32 +1522,59 @@ document.getElementById('csv').addEventListener('click', function(){
 });
 
 /* ================= boot ================= */
+function showLoader(msg){
+  var el = document.getElementById('loading');
+  el.style.display = '';
+  el.innerHTML = '<div class="eyebrow" id="loadMsg">' + esc(msg || 'Loading') + '</div>' +
+                 '<div class="bar2 determinate"><i id="loadBar" style="width:2%"></i></div>' +
+                 '<div class="loadnote">The sheet is read once — after this, every filter runs on the device.</div>';
+}
+function hideLoader(){ document.getElementById('loading').style.display = 'none'; }
+function setProgress(msg, frac){
+  var m = document.getElementById('loadMsg'), b = document.getElementById('loadBar');
+  if (m) m.textContent = msg;
+  if (b) b.style.width = Math.max(2, Math.round(frac*100)) + '%';
+}
 function fail(msg){
+  document.getElementById('loading').style.display = '';
   document.getElementById('loading').innerHTML =
     '<div class="eyebrow" style="color:var(--neg)">Could not load the sheet</div>' +
     '<p style="max-width:420px;text-align:center;font-size:13px">' + esc(msg) + '</p>' +
     '<button class="btn" onclick="location.reload()">Try again</button>';
 }
-function boot(){
-  loadSites(function(){
+var built = false;
+function afterLoad(rebuild){
+  if (!built){
     buildSelectors();
-    loadScope(function(){
-      /* pick the newest year as current, the one before it as base */
-      if (!state.yrB){
-        state.yrB = YEARS[NY-1];
-        state.yrA = YEARS[NY-2] !== undefined ? YEARS[NY-2] : YEARS[NY-1];
-      }
-      LASTM = 0;
-      var ib = yIdx(YEARS[NY-1]);
-      (FACTS||[]).forEach(function(r){ if (yIdx(r[1]) === ib && r[2] > LASTM) LASTM = r[2]; });
-      state.m1 = 0; state.m2 = LASTM;
-      buildPeriod(); wirePeriod(); buildCatFilter();
-      loadChecks();
-      renderHead(); syncPresets(); render();
-      if (document.getElementById('status').className.indexOf('stale') < 0) setStatus('ok', '');
-      document.getElementById('loading').style.display = 'none';
-    });
-  }, fail);
+    buildCatFilter();
+    built = true;
+  } else if (rebuild){
+    msCust.refresh(); msSite.refresh();
+  }
+  if (!state.yrB || YEARS.indexOf(state.yrB) < 0){
+    state.yrB = YEARS[NY-1];
+    state.yrA = YEARS[NY-2] !== undefined ? YEARS[NY-2] : YEARS[NY-1];
+    state.m1 = 0; state.m2 = LASTM;
+  }
+  buildPeriod();
+  if (!wired){ wirePeriod(); wired = true; }
+  loadChecks();
+  renderHead(); syncPresets(); render();
+  setStatus('ok', '');
+}
+var wired = false;
+function boot(){
+  showLoader('Looking for data on this device…');
+  snapshotLoad(function(snap){
+    if (snap){
+      applySnapshot(snap);
+      afterLoad(false);
+      hideLoader();
+      return;
+    }
+    showLoader('Reading the sheet…');
+    loadAll(setProgress, function(){ afterLoad(false); hideLoader(); }, fail);
+  });
 }
 if (window.requestAnimationFrame) requestAnimationFrame(function(){ setTimeout(boot, 20); });
 else setTimeout(boot, 20);
