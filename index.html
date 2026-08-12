@@ -454,7 +454,7 @@ var SITES = [], CUSTOMERS = [], sitesByCust = {};
 var YEARS = [], NY = 0, LASTM = 11;
 var F = null;            /* {s,i,p,v,q} typed arrays — the whole dataset, in memory */
 var loadedAt = null;
-var DATA_VERSION = 3;
+var DATA_VERSION = 4;
 
 /* ---------- gviz over JSONP (no CORS, works from a static page) ---------- */
 var gvSeq = 0;
@@ -546,7 +546,205 @@ function applySnapshot(snap){
   }
 }
 
-/* ---------- the one and only load ----------
+/* ---------- the load: one CSV request, parsed as the bytes arrive ----------
+   /export?format=csv allows cross-origin fetch, so the whole tab comes down in a
+   single gzipped stream. We parse it chunk by chunk and fold each row straight
+   into numeric buckets, so the browser never holds the full text or a row object. */
+var CSV_GID = '';        /* the sheet has one tab; set a gid here if that changes */
+function csvUrl(){
+  return 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/export?format=csv' +
+         (CSV_GID ? '&gid=' + CSV_GID : '') + '&t=' + Date.now();
+}
+
+/* column positions in the sheet */
+var C_DEP = 0, C_ITEM = 3, C_CUST = 6, C_CODE = 10, C_SITE = 11, C_CHAN = 13,
+    C_YR = 14, C_MNTH = 15, C_SALES = 16, C_CASES = 17;
+
+function Buckets(){
+  this.map = {};                 /* composite key -> slot */
+  this.cap = 1 << 16; this.n = 0;
+  this.key = new Float64Array(this.cap);
+  this.v = new Float64Array(this.cap);
+  this.q = new Float64Array(this.cap);
+}
+Buckets.prototype.add = function(k, v, q){
+  var slot = this.map[k];
+  if (slot === undefined){
+    if (this.n === this.cap){
+      this.cap *= 2;
+      var K = new Float64Array(this.cap); K.set(this.key); this.key = K;
+      var V = new Float64Array(this.cap); V.set(this.v); this.v = V;
+      var Q = new Float64Array(this.cap); Q.set(this.q); this.q = Q;
+    }
+    slot = this.n++;
+    this.map[k] = slot;
+    this.key[slot] = k;
+  }
+  this.v[slot] += v; this.q[slot] += q;
+};
+
+/* split one CSV line; fast path for the common case with no quotes */
+function splitCsv(line){
+  if (line.indexOf('"') < 0) return line.split(',');
+  var out = [], cur = '', inQ = false;
+  for (var i=0;i<line.length;i++){
+    var ch = line.charAt(i);
+    if (inQ){
+      if (ch === '"'){
+        if (line.charAt(i+1) === '"'){ cur += '"'; i++; }
+        else inQ = false;
+      } else cur += ch;
+    } else if (ch === '"'){ inQ = true; }
+    else if (ch === ','){ out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+function loadAll(progress, ok, fail){
+  var sites = [], codeIdx = {}, siteLastP = [], yearSeen = {}, B = new Buckets();
+  var rows = 0, bytes = 0, header = true, tail = '', badItems = 0;
+
+  function handleLine(line){
+    if (!line) return;
+    if (header){ header = false; return; }              /* column titles */
+    var f = splitCsv(line);
+    if (f.length < 18) return;
+    if (f[C_DEP].trim().toUpperCase() !== 'CPD') return;
+
+    /* register the outlet from any CPD row, so a store that has only ever bought
+       off-list items still appears and can be audited */
+    var code = f[C_CODE].trim();
+    var si = codeIdx[code];
+    var yy = parseInt(f[C_YR], 10), mm = MI[f[C_MNTH].trim().slice(0,3).toLowerCase()];
+    var abs = (isNaN(yy) || mm === undefined) ? -1 : yy*12 + mm;
+    if (si === undefined){
+      si = sites.length;
+      codeIdx[code] = si;
+      sites.push([f[C_CUST].trim(), f[C_SITE].trim(), code, f[C_CHAN].trim(), 0]);
+      siteLastP[si] = abs;
+    } else if (abs > siteLastP[si]){
+      /* an outlet keeps one identity across renames — show its most recent name */
+      siteLastP[si] = abs;
+      var nm = f[C_SITE].trim();
+      if (nm && nm !== sites[si][1]) sites[si][1] = nm;
+      var cu = f[C_CUST].trim();
+      if (cu && cu !== sites[si][0]) sites[si][0] = cu;
+      var ch = f[C_CHAN].trim();
+      if (ch && ch !== sites[si][3]) sites[si][3] = ch;
+    }
+
+    var ii = imap[parseInt(f[C_ITEM], 10)];
+    if (ii === undefined){ badItems++; return; }        /* not on the master item list */
+    if (abs < 0) return;
+    var m = mm, y = yy;
+    var v = parseFloat(f[C_SALES]) || 0, q = parseFloat(f[C_CASES]) || 0;
+    if (!v && !q) return;
+    yearSeen[y] = 1;
+    rows++;
+    /* one bucket per site x item x year x month */
+    B.add(((si * NI + ii) * 64 + (y - 2000)) * 12 + m, v, q);
+  }
+
+  function feed(text){
+    tail += text;
+    var start = 0, nl;
+    while ((nl = tail.indexOf('\n', start)) >= 0){
+      var line = tail.substring(start, nl);
+      if (line.charCodeAt(line.length-1) === 13) line = line.slice(0, -1);
+      /* a quoted field can legally contain a newline — rejoin if quotes are unbalanced */
+      var qc = 0, p = -1;
+      while ((p = line.indexOf('"', p+1)) >= 0) qc++;
+      if (qc % 2 === 1){
+        var nl2 = tail.indexOf('\n', nl+1);
+        if (nl2 < 0) break;
+        nl = nl2;
+        line = tail.substring(start, nl).replace(/\r/g,'');
+      }
+      handleLine(line);
+      start = nl + 1;
+    }
+    tail = tail.substring(start);
+  }
+
+  function finish(){
+    if (tail) handleLine(tail.replace(/\r$/,''));
+    if (!rows) return fail('No CPD rows were found in the sheet. Check the tab and the column order.');
+    progress('Preparing the dashboard…', 0.97);
+
+    var years = Object.keys(yearSeen).map(Number).sort(function(a,b){ return a-b; });
+    var yIndex = {};
+    years.forEach(function(y,i){ yIndex[y] = i; });
+
+    var n = B.n;
+    var fs = new Int32Array(n), fi = new Int32Array(n), fp = new Int32Array(n),
+        fv = new Float64Array(n), fq = new Float64Array(n);
+    for (var k=0;k<n;k++){
+      var key = B.key[k];
+      var m = key % 12; key = (key - m) / 12;
+      var y = (key % 64) + 2000; key = (key - (y - 2000)) / 64;
+      var ii = key % NI;
+      var si = (key - ii) / NI;
+      fs[k] = si; fi[k] = ii; fp[k] = yIndex[y]*12 + m; fv[k] = B.v[k]; fq[k] = B.q[k];
+    }
+    B = null;
+
+    var snap = {version:DATA_VERSION, at:new Date().toISOString(), years:years, sites:sites,
+                f:{s:fs, i:fi, p:fp, v:fv, q:fq}};
+    applySnapshot(snap);
+    snapshotSave(snap);
+    ok();
+  }
+
+  function report(){
+    progress('Reading the sheet — ' + (bytes/1048576).toFixed(1) + ' MB, ' +
+             (rows/1000).toFixed(0) + 'k rows', Math.min(0.95, 0.05 + bytes/45000000));
+  }
+
+  progress('Connecting to the Google Sheet…', 0.03);
+  if (!window.fetch){ return loadViaGviz(progress, ok, fail); }
+
+  fetch(csvUrl(), {method:'GET', credentials:'omit', redirect:'follow'})
+    .then(function(resp){
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      if (resp.body && resp.body.getReader){
+        var reader = resp.body.getReader();
+        var dec = new TextDecoder('utf-8');
+        var ticks = 0;
+        return (function pump(){
+          return reader.read().then(function(res){
+            if (res.done){
+              feed(dec.decode());
+              return finish();
+            }
+            bytes += res.value.length;
+            feed(dec.decode(res.value, {stream:true}));
+            if ((++ticks % 4) === 0) report();
+            return pump();
+          });
+        })();
+      }
+      /* older browsers: no streaming, take the whole body */
+      return resp.text().then(function(txt){
+        if (txt.trim().slice(0,9).toLowerCase().indexOf('<!doctype') >= 0)
+          throw new Error('The sheet is not publicly readable.');
+        bytes = txt.length; report();
+        feed(txt); txt = null;
+        return finish();
+      });
+    })
+    .catch(function(err){
+      /* CORS, offline, or a permissions redirect — try the slower JSONP route */
+      progress('Direct download unavailable, trying the slower route…', 0.05);
+      loadViaGviz(progress, ok, function(msg){
+        fail((err && err.message ? err.message + '. ' : '') + msg);
+      });
+    });
+}
+
+
+/* ---------- fallback loader: chunked gviz JSONP ----------
    Split into one small request per year+month. A phone cannot parse a single
    100k-row JSONP payload, but it handles ~10k rows at a time comfortably,
    and each chunk is folded into typed arrays and released straight away. */
@@ -573,7 +771,7 @@ Grow.prototype.done = function(){
           v:this.v.slice(0,this.n), q:this.q.slice(0,this.n)};
 };
 
-function loadAll(progress, ok, fail){
+function loadViaGviz(progress, ok, fail){
   var sites = null, codeIdx = {}, years = [], yIndex = {}, chunks = [], totalRows = 0, doneRows = 0;
   var buf = new Grow(), ci = 0;
 
@@ -1429,7 +1627,7 @@ function buildSelectors(){
   msSite = MultiSelect('msSite', {
     allLabel:'All sites',
     options: function(){
-      return scopeSites().map(function(s){ return {id:s, label:SITES[s][1], tag:SITES[s][2]}; })
+      return scopeSites().map(function(s){ return {id:s, label:SITES[s][1], tag:SITES[s][3]}; })
                          .sort(function(a,b){ return a.label < b.label ? -1 : 1; });
     },
     sel: function(){ return state.site; },
@@ -1577,8 +1775,8 @@ function showLoader(msg){
   el.style.display = '';
   el.innerHTML = '<div class="eyebrow" id="loadMsg">' + esc(msg || 'Loading') + '</div>' +
                  '<div class="bar2 determinate"><i id="loadBar" style="width:2%"></i></div>' +
-                 '<div class="loadnote">The sheet is read once, a month at a time. After this it is saved on the ' +
-                 'device — every filter runs offline and reopening is instant.</div>';
+                 '<div class="loadnote">Downloading the sheet once. It is then saved on this device — ' +
+                 'every filter runs offline and reopening is instant.</div>';
 }
 function hideLoader(){ document.getElementById('loading').style.display = 'none'; }
 function setProgress(msg, frac){
