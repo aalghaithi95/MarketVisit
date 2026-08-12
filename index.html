@@ -302,6 +302,9 @@ tr.ok td.desc{color:var(--pos)}
 .loading .loadnote{font-size:11px;color:var(--muted);max-width:300px;text-align:center}
 .loading p{color:var(--text)}
 
+.loading{padding:20px;gap:12px}
+.loading .bar2{width:min(240px,70vw)}
+
 </style>
 </head>
 <body>
@@ -543,84 +546,131 @@ function applySnapshot(snap){
   }
 }
 
-/* ---------- the one and only load ---------- */
-function loadAll(progress, ok, fail){
-  var sites = null, years = null, perYear = [], step = 1;
-  progress('Reading the sheet…', 0.02);
+/* ---------- the one and only load ----------
+   Split into one small request per year+month. A phone cannot parse a single
+   100k-row JSONP payload, but it handles ~10k rows at a time comfortably,
+   and each chunk is folded into typed arrays and released straight away. */
+function Grow(){
+  this.cap = 1 << 16; this.n = 0;
+  this.s = new Int32Array(this.cap); this.i = new Int32Array(this.cap);
+  this.p = new Int32Array(this.cap); this.v = new Float64Array(this.cap);
+  this.q = new Float64Array(this.cap);
+}
+Grow.prototype.push = function(s, i, p, v, q){
+  if (this.n === this.cap){
+    this.cap *= 2;
+    var S = new Int32Array(this.cap); S.set(this.s); this.s = S;
+    var I = new Int32Array(this.cap); I.set(this.i); this.i = I;
+    var P = new Int32Array(this.cap); P.set(this.p); this.p = P;
+    var V = new Float64Array(this.cap); V.set(this.v); this.v = V;
+    var Q = new Float64Array(this.cap); Q.set(this.q); this.q = Q;
+  }
+  var n = this.n++;
+  this.s[n] = s; this.i[n] = i; this.p[n] = p; this.v[n] = v; this.q[n] = q;
+};
+Grow.prototype.done = function(){
+  return {s:this.s.slice(0,this.n), i:this.i.slice(0,this.n), p:this.p.slice(0,this.n),
+          v:this.v.slice(0,this.n), q:this.q.slice(0,this.n)};
+};
 
-  gviz("select " + COL.yr + ", count(" + COL.item + ") where " + COL.dep + " = 'CPD' group by " + COL.yr,
+function loadAll(progress, ok, fail){
+  var sites = null, codeIdx = {}, years = [], yIndex = {}, chunks = [], totalRows = 0, doneRows = 0;
+  var buf = new Grow(), ci = 0;
+
+  progress('Reading the sheet…', 0.02);
+  gviz("select " + COL.yr + ", " + COL.mnth + ", count(" + COL.item + ") " +
+       "where " + COL.dep + " = 'CPD' group by " + COL.yr + ", " + COL.mnth,
     function(t){
-      years = [];
-      t.rows.forEach(function(r){ var y = cell(r,0); if (y !== null) years.push(parseInt(y,10)); });
-      years = years.filter(function(y){ return !isNaN(y); }).sort(function(a,b){ return a-b; });
+      var seenY = {};
+      for (var r=0;r<t.rows.length;r++){
+        var y = cell(t.rows[r],0), m = cell(t.rows[r],1), c = cell(t.rows[r],2);
+        if (y === null || m === null) continue;
+        var yy = parseInt(y,10);
+        var mi = MI[String(m).trim().slice(0,3).toLowerCase()];
+        if (isNaN(yy) || mi === undefined) continue;
+        seenY[yy] = 1;
+        chunks.push({y:yy, mLabel:String(m).trim(), m:mi, n:num(c) || 1});
+        totalRows += num(c) || 1;
+      }
+      years = Object.keys(seenY).map(Number).sort(function(a,b){ return a-b; });
       if (!years.length) return fail('No CPD rows found in the sheet.');
+      years.forEach(function(y,i){ yIndex[y] = i; });
+      chunks.sort(function(a,b){ return (a.y-b.y) || (a.m-b.m); });
       loadSites();
     }, fail);
 
   function loadSites(){
-    progress('Loading outlets…', 0.08);
+    progress('Loading outlets…', 0.06);
     gviz("select " + COL.cust + ", " + COL.site + ", " + COL.code + ", " + COL.chan + ", count(" + COL.item + ") " +
          "where " + COL.dep + " = 'CPD' group by " + COL.cust + ", " + COL.site + ", " + COL.code + ", " + COL.chan,
       function(t){
         sites = [];
-        t.rows.forEach(function(r){
-          var c = cell(r,0), s = cell(r,1), k = cell(r,2);
-          if (c === null || s === null || k === null) return;
-          sites.push([String(c).trim(), String(s).trim(), String(k).trim(), String(cell(r,3)||'').trim(), 0]);
-        });
+        for (var r=0;r<t.rows.length;r++){
+          var c = cell(t.rows[r],0), s = cell(t.rows[r],1), k = cell(t.rows[r],2);
+          if (c === null || s === null || k === null) continue;
+          sites.push([String(c).trim(), String(s).trim(), String(k).trim(), String(cell(t.rows[r],3)||'').trim(), 0]);
+        }
         if (!sites.length) return fail('The sheet returned no outlets.');
-        nextYear();
+        sites.forEach(function(r,i){ codeIdx[r[2]] = i; });
+        nextChunk();
       }, fail);
   }
 
-  /* one query per year: smaller responses, and a progress bar that means something */
-  function nextYear(){
-    if (step > years.length) return finish();
-    var y = years[step - 1];
-    progress('Loading ' + y + ' — year ' + step + ' of ' + years.length + '…',
-             0.1 + 0.85 * ((step-1)/years.length));
-    gviz("select " + COL.code + ", " + COL.item + ", " + COL.mnth + ", sum(" + COL.sales + "), sum(" + COL.cases + ") " +
-         "where " + COL.dep + " = 'CPD' and " + COL.yr + " = " + y +
-         " group by " + COL.code + ", " + COL.item + ", " + COL.mnth,
-      function(t){ perYear.push({y:y, rows:t.rows}); step++; nextYear(); }, fail);
+  /* a few chunks in flight at once — enough to hide the round trips,
+     few enough that a phone never holds several big payloads in memory */
+  var LANES = 3, active = 0, finished = 0, failed = false;
+  function nextChunk(){
+    if (failed) return;
+    if (finished >= chunks.length) return finish();
+    while (active < LANES && ci < chunks.length){
+      runChunk(chunks[ci++], 0);
+    }
+  }
+  function runChunk(c, attempt){
+    active++;
+    gviz("select " + COL.code + ", " + COL.item + ", sum(" + COL.sales + "), sum(" + COL.cases + ") " +
+         "where " + COL.dep + " = 'CPD' and " + COL.yr + " = " + c.y +
+         " and " + COL.mnth + " = '" + String(c.mLabel).replace(/'/g,"''") + "'" +
+         " group by " + COL.code + ", " + COL.item,
+      function(t){
+        if (failed) return;
+        var p = yIndex[c.y]*12 + c.m, rows = t.rows;
+        for (var r=0;r<rows.length;r++){
+          var code = cell(rows[r],0), item = cell(rows[r],1);
+          if (code === null || item === null) continue;
+          var si = codeIdx[String(code).trim()];
+          if (si === undefined) continue;
+          var ii = imap[typeof item === 'number' ? item : parseInt(String(item).replace(/\D/g,''),10)];
+          if (ii === undefined) continue;               /* not on the master item list */
+          var val = num(cell(rows[r],2)), qty = num(cell(rows[r],3));
+          if (!val && !qty) continue;
+          buf.push(si, ii, p, val, qty);
+        }
+        t.rows = null; rows = null;
+        active--; finished++; doneRows += c.n;
+        progress(MONTHS[c.m] + ' ' + c.y + ' — ' + finished + ' of ' + chunks.length + ' months',
+                 0.08 + 0.88 * (doneRows/(totalRows||1)));
+        setTimeout(nextChunk, 0);        /* yield so the phone stays responsive */
+      },
+      function(msg){
+        if (failed) return;
+        active--;
+        if (attempt < 2){ setTimeout(function(){ runChunk(c, attempt+1); }, 800 * (attempt+1)); return; }
+        failed = true;
+        fail(msg);
+      });
   }
 
   function finish(){
-    progress('Preparing the dashboard…', 0.97);
-    var codeIdx = {};
-    sites.forEach(function(r,i){ codeIdx[r[2]] = i; });
-    var yIndex = {};
-    years.forEach(function(y,i){ yIndex[y] = i; });
-
-    var total = 0;
-    perYear.forEach(function(b){ total += b.rows.length; });
-    var s = new Int32Array(total), it = new Int32Array(total), p = new Int32Array(total),
-        v = new Float64Array(total), q = new Float64Array(total), n = 0;
-
-    perYear.forEach(function(b){
-      var yi = yIndex[b.y];
-      b.rows.forEach(function(r){
-        var code = cell(r,0), item = cell(r,1), m = cell(r,2);
-        if (code === null || item === null || m === null) return;
-        var si = codeIdx[String(code).trim()];
-        if (si === undefined) return;
-        var ii = imap[typeof item === 'number' ? item : parseInt(String(item).replace(/\D/g,''),10)];
-        if (ii === undefined) return;                    /* not on the master item list */
-        var mi = MI[String(m).trim().slice(0,3).toLowerCase()];
-        if (mi === undefined) return;
-        var val = num(cell(r,3)), qty = num(cell(r,4));
-        if (!val && !qty) return;
-        s[n] = si; it[n] = ii; p[n] = yi*12 + mi; v[n] = val; q[n] = qty; n++;
-      });
-    });
-    perYear = null;
+    progress('Preparing the dashboard…', 0.98);
     var snap = {
       version: DATA_VERSION,
       at: new Date().toISOString(),
       years: years,
       sites: sites,
-      f: {s:s.slice(0,n), i:it.slice(0,n), p:p.slice(0,n), v:v.slice(0,n), q:q.slice(0,n)}
+      f: buf.done()
     };
+    buf = null;
     applySnapshot(snap);
     snapshotSave(snap);
     ok();
@@ -1527,7 +1577,8 @@ function showLoader(msg){
   el.style.display = '';
   el.innerHTML = '<div class="eyebrow" id="loadMsg">' + esc(msg || 'Loading') + '</div>' +
                  '<div class="bar2 determinate"><i id="loadBar" style="width:2%"></i></div>' +
-                 '<div class="loadnote">The sheet is read once — after this, every filter runs on the device.</div>';
+                 '<div class="loadnote">The sheet is read once, a month at a time. After this it is saved on the ' +
+                 'device — every filter runs offline and reopening is instant.</div>';
 }
 function hideLoader(){ document.getElementById('loading').style.display = 'none'; }
 function setProgress(msg, frac){
