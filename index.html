@@ -27,6 +27,7 @@ body{
 }
 .mono{font-family:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
 .num{font-family:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+td.d-avgq,th.d-avgq{display:none}
 .eyebrow{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
 button,select,input{font-family:inherit;font-size:inherit;color:inherit}
 :focus-visible{outline:2px solid var(--accent);outline-offset:1px}
@@ -122,22 +123,27 @@ body.reporting>#reportWrap{display:block!important;position:fixed;inset:0;z-inde
   body.reporting>*{display:none!important}
   body.reporting>#reportWrap{display:block!important;position:static;overflow:visible;padding:0;background:#fff}
   .rep-tools{display:none!important}
+  .rep th{background:#134C8C!important;color:#fff!important;
+    -webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
   @page{margin:12mm}
 }
-.rep{font-family:'Archivo',sans-serif;color:#000;font-size:11px}
+.rep{font-family:'Archivo',sans-serif;color:#000;font-size:11px;
+  -webkit-print-color-adjust:exact;print-color-adjust:exact}
 .rep h1{font-size:17px;margin:0 0 2px}
 .rep .sub{font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:.16em;text-transform:uppercase;color:#555}
 .rep .meta{margin:12px 0 14px;border-top:1.5px solid #000;border-bottom:1px solid #999;padding:8px 0;display:flex;gap:26px;flex-wrap:wrap}
 .rep .meta div{font-size:10.5px}
 .rep .meta span{display:block;font-family:'IBM Plex Mono',monospace;font-size:8.5px;letter-spacing:.14em;text-transform:uppercase;color:#666}
 .rep table{width:100%;border-collapse:collapse;font-size:10px;margin-top:6px}
-.rep th{background:#EEE;border-bottom:1px solid #000;text-align:left;padding:5px 6px;font-size:8.5px;
-  font-family:'IBM Plex Mono',monospace;letter-spacing:.1em;text-transform:uppercase}
+.rep th{background:#134C8C;color:#fff;border-bottom:1px solid #0D3565;text-align:left;
+  padding:6px 6px;font-size:8.5px;font-weight:600;
+  font-family:'IBM Plex Mono',monospace;letter-spacing:.1em;text-transform:uppercase;
+  -webkit-print-color-adjust:exact;print-color-adjust:exact}
 .rep td{border-bottom:1px solid #DDD;padding:4px 6px}
 .rep td.n{text-align:right;font-family:'IBM Plex Mono',monospace}
 .rep tr{page-break-inside:avoid}
 .rep thead{display:table-header-group}
-.rep h2{font-size:12px;margin:18px 0 2px;border-bottom:1px solid #000;padding-bottom:3px}
+.rep h2{font-size:12px;margin:18px 0 2px;color:#134C8C;border-bottom:1.5px solid #134C8C;padding-bottom:3px}
 .rep .note{margin-top:14px;font-size:9px;color:#666;border-top:1px solid #CCC;padding-top:6px}
 
 /* ---------- table ---------- */
@@ -226,11 +232,12 @@ tr.ok td.desc{color:var(--pos)}
   #tbl tbody td.desc{grid-column:2/5;grid-row:1;white-space:normal;max-width:none;
     font-size:13px;font-weight:600;line-height:1.2}
   #tbl tbody td.d-q26{grid-column:2;grid-row:2}
-  #tbl tbody td.d-avg{grid-column:3;grid-row:2}
+  #tbl tbody td.d-avgq{display:table-cell;grid-column:3;grid-row:2}
   #tbl tbody td.d-last{grid-column:4;grid-row:2}
   #tbl tbody td.c-type,#tbl tbody td.c-cat,#tbl tbody td.c-code,
   #tbl tbody td.d-q25,#tbl tbody td.d-dq,#tbl tbody td.d-v25,
-  #tbl tbody td.d-v26,#tbl tbody td.d-dv,#tbl tbody td.d-delta{display:none!important}
+  #tbl tbody td.d-v26,#tbl tbody td.d-dv,#tbl tbody td.d-delta,
+  #tbl tbody td.d-avg{display:none!important}
   #tbl tbody td.num{text-align:left}
   #tbl tbody td[data-l]{margin-top:2px;font-size:12.5px}
   #tbl tbody td[data-l]::before{content:attr(data-l);display:block;
@@ -518,7 +525,7 @@ function buildRows(){
       i:i, code:it[0], desc:it[1], cat:it[2], catI:catOf[i], type:it[3], promo:(it[3]==='Promotion'),
       q25:q25, q26:q26, dq:(q25? q26/q25-1 : (q26?Infinity:0)),
       v25:v25, v26:v26, dv:(v25? v26/v25-1 : (v26?Infinity:0)),
-      delta:v26-v25, avg:v26/mo, last:A.last[i]
+      delta:v26-v25, avg:v26/mo, avgq:q26/mo, last:A.last[i]
     });
   }
   return rows;
@@ -556,6 +563,7 @@ var COLS = [
   {k:'dv',    t:'Change', r:1},
   {k:'delta', t:'Value vs 2025', r:1},
   {k:'avg',   t:"Avg 26'/Mo", r:1},
+  {k:'avgq',  t:'Avg QTY', r:1, hide:1},
   {k:'last',  t:'Last Sale'}
 ];
 function renderHead(){
@@ -563,6 +571,7 @@ function renderHead(){
   for (var c=0;c<COLS.length;c++){
     var col = COLS[c];
     if (col.chk){ h += '<th class="chkh" title="Tick items found on shelf">'+col.t+'</th>'; continue; }
+    if (col.hide){ h += '<th class="d-avgq"></th>'; continue; }
     var on = state.sort.key===col.k;
     h += '<th data-k="'+col.k+'" class="'+(col.r?'r ':'')+(on?'sorted':'')+'">'+col.t+
          (on ? ' <span class="ar">'+(state.sort.dir<0?'▼':'▲')+'</span>' : '')+'</th>';
@@ -612,7 +621,7 @@ function render(){
       '<td class="num">'+fmtS(s.q25)+'</td><td class="num">'+fmtS(s.q26)+'</td><td class="num">'+pctCell(s.q26,s.q25)+'</td>'+
       '<td class="num">'+fmtS(s.v25)+'</td><td class="num">'+fmtS(s.v26)+'</td><td class="num">'+pctCell(s.v26,s.v25)+'</td>'+
       '<td class="num">'+(s.v26-s.v25>=0?'+':'−')+nf0.format(Math.abs(Math.round(s.v26-s.v25)))+'</td>'+
-      '<td class="num">'+fmtS(s.v26/months26())+'</td><td></td></tr>';
+      '<td class="num">'+fmtS(s.v26/months26())+'</td><td class="d-avgq"></td><td></td></tr>';
   }
   for (i=0;i<rows.length;i++){
     var r = rows[i];
@@ -642,17 +651,18 @@ function render(){
       '<td class="num d-dv" data-l="Value change">'+pctCell(r.v26,r.v25)+'</td>'+
       '<td class="num d-delta" data-l="Vs 2025"><span class="'+(r.delta>0?'up':(r.delta<0?'down':'flat'))+'">'+(r.delta>=0?'+':'−')+nf0.format(Math.abs(Math.round(r.delta)))+'</span></td>'+
       '<td class="num d-avg" data-l="Avg sales">'+fmt(r.avg)+'</td>'+
+      '<td class="num d-avgq" data-l="Avg QTY">'+fmt(r.avgq)+'</td>'+
       '<td class="d-last" data-l="Last supplied">'+lastLabel(r.last)+'</td></tr>');
   }
   document.getElementById('tbody').innerHTML = out.length ? out.join('') :
-    '<tr><td colspan="14" class="empty">No items match this selection. Widen the period or clear the filters.</td></tr>';
+    '<tr><td colspan="15" class="empty">No items match this selection. Widen the period or clear the filters.</td></tr>';
 
   document.getElementById('tfoot').innerHTML =
     '<tr><td colspan="5">TOTAL — '+rows.length+' items</td>'+
     '<td class="num">'+fmtS(T.q25)+'</td><td class="num">'+fmtS(T.q26)+'</td><td class="num">'+pctCell(T.q26,T.q25)+'</td>'+
     '<td class="num">'+fmtS(T.v25)+'</td><td class="num">'+fmtS(T.v26)+'</td><td class="num">'+pctCell(T.v26,T.v25)+'</td>'+
     '<td class="num">'+(T.v26-T.v25>=0?'+':'−')+nf0.format(Math.abs(Math.round(T.v26-T.v25)))+'</td>'+
-    '<td class="num">'+fmtS(T.v26/months26())+'</td><td></td></tr>';
+    '<td class="num">'+fmtS(T.v26/months26())+'</td><td class="d-avgq"></td><td></td></tr>';
 
   document.getElementById('rowCount').textContent =
     rows.length + ' items · ' + siteScopeLabel() + ' · ' + periodLabel() + ' 2025 vs 2026';
@@ -689,6 +699,187 @@ function siteScopeLabel(){
 }
 
 /* ---------- store check ---------- */
+/* ---------- minimal PDF writer (Helvetica, no external libraries) ---------- */
+var HW = ('278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,'+
+'556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,'+
+'722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,'+
+'222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584').split(',').map(Number);
+var HB = ('278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,'+
+'556,556,333,333,584,584,584,611,975,722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,667,778,'+
+'722,667,611,722,667,944,667,667,611,333,278,333,584,556,333,556,611,556,611,556,333,611,611,278,278,556,'+
+'278,889,611,611,611,611,389,556,333,611,556,778,556,556,500,389,280,389,584').split(',').map(Number);
+
+function pdfSafe(v){
+  return String(v == null ? '' : v)
+    .replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-').replace(/[\u00B7\u2022]/g, '-')
+    .replace(/\u2026/g, '...').replace(/\u00A0/g, ' ')
+    .replace(/[^\x20-\x7E]/g, '');
+}
+function pdfEsc(t){ return t.replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)'); }
+function txtW(t, size, bold){
+  var W = bold ? HB : HW, w = 0;
+  for (var i=0;i<t.length;i++){
+    var c = t.charCodeAt(i) - 32;
+    w += (c >= 0 && c < W.length) ? W[c] : 556;
+  }
+  return w * size / 1000;
+}
+function fitText(t, size, bold, maxW){
+  if (txtW(t, size, bold) <= maxW) return t;
+  var cut = t;
+  while (cut.length > 1 && txtW(cut + '...', size, bold) > maxW) cut = cut.slice(0, -1);
+  return cut + '...';
+}
+
+function PdfDoc(){
+  this.PW = 595.28; this.PH = 841.89; this.M = 40;
+  this.pages = []; this.ops = null; this.y = 0;
+  this.newPage();
+}
+PdfDoc.prototype.newPage = function(){ this.ops = []; this.pages.push(this.ops); this.y = this.PH - this.M; };
+PdfDoc.prototype.text = function(x, y, t, o){
+  o = o || {};
+  t = pdfSafe(t); if (!t) return;
+  var size = o.size || 9, bold = !!o.bold;
+  if (o.maxW) t = fitText(t, size, bold, o.maxW);
+  if (o.align === 'r') x = x - txtW(t, size, bold);
+  var c = o.color || [0,0,0];
+  this.ops.push('BT /' + (bold ? 'F2' : 'F1') + ' ' + size + ' Tf ' +
+    c[0] + ' ' + c[1] + ' ' + c[2] + ' rg ' +
+    x.toFixed(2) + ' ' + y.toFixed(2) + ' Td (' + pdfEsc(t) + ') Tj ET');
+};
+PdfDoc.prototype.rect = function(x, y, w, h, c){
+  this.ops.push(c[0] + ' ' + c[1] + ' ' + c[2] + ' rg ' +
+    x.toFixed(2) + ' ' + y.toFixed(2) + ' ' + w.toFixed(2) + ' ' + h.toFixed(2) + ' re f');
+};
+PdfDoc.prototype.line = function(x1, y1, x2, y2, c, w){
+  this.ops.push((w || 0.5) + ' w ' + c[0] + ' ' + c[1] + ' ' + c[2] + ' RG ' +
+    x1.toFixed(2) + ' ' + y1.toFixed(2) + ' m ' + x2.toFixed(2) + ' ' + y2.toFixed(2) + ' l S');
+};
+PdfDoc.prototype.build = function(){
+  var self = this, objs = [], n = this.pages.length;
+  var kids = [];
+  for (var i=0;i<n;i++) kids.push((5 + i*2) + ' 0 R');
+  objs[1] = '<< /Type /Catalog /Pages 2 0 R >>';
+  objs[2] = '<< /Type /Pages /Kids [' + kids.join(' ') + '] /Count ' + n + ' >>';
+  objs[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>';
+  objs[4] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>';
+  this.pages.forEach(function(ops, i){
+    var pid = 5 + i*2, cid = pid + 1, stream = ops.join('\n');
+    objs[pid] = '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + self.PW.toFixed(2) + ' ' + self.PH.toFixed(2) +
+      '] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ' + cid + ' 0 R >>';
+    objs[cid] = '<< /Length ' + stream.length + ' >>\nstream\n' + stream + '\nendstream';
+  });
+  var out = '%PDF-1.4\n', offsets = [];
+  for (var k=1;k<objs.length;k++){
+    offsets[k] = out.length;
+    out += k + ' 0 obj\n' + objs[k] + '\nendobj\n';
+  }
+  var xref = out.length, size = objs.length;
+  out += 'xref\n0 ' + size + '\n0000000000 65535 f \n';
+  for (var j=1;j<size;j++){
+    out += ('0000000000' + offsets[j]).slice(-10) + ' 00000 n \n';
+  }
+  out += 'trailer\n<< /Size ' + size + ' /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF';
+  var bytes = new Uint8Array(out.length);
+  for (var b=0;b<out.length;b++) bytes[b] = out.charCodeAt(b) & 0xFF;
+  return bytes;
+};
+
+/* ---------- render the missing-items report as a real PDF ---------- */
+var BLUE = [0.075, 0.298, 0.549], GREY = [0.42,0.45,0.44], BLACK = [0,0,0], RULE = [0.80,0.83,0.81];
+function reportPdf(info, rows){
+  var doc = new PdfDoc(), M = doc.M, RIGHT = doc.PW - M, W = RIGHT - M;
+  var cols = [
+    {t:'CATEGORY',        w:78},
+    {t:'ITEM CODE',       w:56},
+    {t:'ITEM DESCRIPTION',w:187},
+    {t:'LAST SUPPLIED',   w:66},
+    {t:'2026 VALUE',      w:64, a:'r'},
+    {t:'2025 VALUE',      w:64, a:'r'}
+  ];
+  var xs = [], acc = M;
+  cols.forEach(function(c){ xs.push(acc); acc += c.w; });
+
+  function tableHead(){
+    var h = 15;
+    doc.y -= h;
+    doc.rect(M, doc.y, W, h, BLUE);
+    cols.forEach(function(c, i){
+      var x = c.a === 'r' ? xs[i] + c.w - 4 : xs[i] + 4;
+      doc.text(x, doc.y + 4.6, c.t, {size:6.6, bold:true, color:[1,1,1], align:c.a, maxW:c.w-8});
+    });
+    doc.y -= 2;
+  }
+
+  /* ---- header block ---- */
+  doc.y -= 4;
+  doc.text(M, doc.y, 'DELICIO - OMAN - CPD', {size:7, bold:true, color:BLUE});
+  doc.y -= 17;
+  doc.text(M, doc.y, 'Store availability check - missing items', {size:15, bold:true});
+  doc.y -= 8;
+  doc.line(M, doc.y, RIGHT, doc.y, BLUE, 1.4);
+
+  var meta = info.meta, perRow = 3, colW = W / perRow;
+  for (var i=0;i<meta.length;i+=perRow){
+    doc.y -= 17;
+    for (var j=0;j<perRow && i+j<meta.length;j++){
+      var x = M + j*colW;
+      doc.text(x, doc.y + 8, meta[i+j][0].toUpperCase(), {size:6.2, bold:true, color:GREY});
+      doc.text(x, doc.y, meta[i+j][1], {size:9, maxW:colW-10});
+    }
+  }
+  doc.y -= 10;
+  doc.line(M, doc.y, RIGHT, doc.y, RULE, 0.7);
+
+  /* ---- table ---- */
+  doc.y -= 22;
+  doc.text(M, doc.y, 'Missing items and last supply', {size:11, bold:true, color:BLUE});
+  doc.y -= 5;
+  doc.line(M, doc.y, RIGHT, doc.y, BLUE, 1);
+  doc.y -= 4;
+
+  if (!rows.length){
+    doc.y -= 20;
+    doc.text(M, doc.y, 'Every regular item in this assortment was found on shelf.', {size:10});
+  } else {
+    tableHead();
+    rows.forEach(function(r){
+      if (doc.y < M + 46){ doc.newPage(); doc.y -= 6; tableHead(); }
+      var h = 13.5;
+      doc.y -= h;
+      cols.forEach(function(c, i){
+        var x = c.a === 'r' ? xs[i] + c.w - 4 : xs[i] + 4;
+        doc.text(x, doc.y + 4, r[i], {size:8.2, align:c.a, maxW:c.w-8});
+      });
+      doc.line(M, doc.y, RIGHT, doc.y, RULE, 0.4);
+    });
+  }
+
+  /* ---- note ---- */
+  if (doc.y < M + 76){ doc.newPage(); }
+  doc.y -= 22;
+  doc.line(M, doc.y + 8, RIGHT, doc.y + 8, RULE, 0.5);
+  var note = [
+    'Missing = a regular item in this customer\'s selling assortment that was not ticked during the visit.',
+    'Last supplied is the most recent month the item shipped to this customer / site.',
+    'Promotional packs are excluded from the check. Data covers CPD only - Food Service (FSD) is out of scope.',
+    'Values cover ' + info.period + '.'
+  ];
+  note.forEach(function(t){ doc.text(M, doc.y, t, {size:7.4, color:GREY}); doc.y -= 10; });
+
+  /* ---- footers ---- */
+  var total = doc.pages.length;
+  doc.pages.forEach(function(ops, i){
+    var save = doc.ops; doc.ops = ops;
+    doc.text(M, M - 14, 'Delicio Oman CPD - store availability check', {size:7, color:GREY});
+    doc.text(RIGHT, M - 14, 'Page ' + (i+1) + ' of ' + total, {size:7, color:GREY, align:'r'});
+    doc.ops = save;
+  });
+  return doc.build();
+}
+
 function scopeKey(){
   if (state.site.size) return 'S:' + Array.from(state.site).sort(function(a,b){return a-b;}).join('.');
   if (state.cust.size) return 'C:' + Array.from(state.cust).sort(function(a,b){return a-b;}).join('.');
@@ -778,8 +969,8 @@ document.getElementById('pdf').addEventListener('click', function(){
   document.getElementById('report').innerHTML =
     '<div class="rep-tools">'+
       '<button class="btn ghost" id="repClose" type="button">Close</button>'+
-      '<button class="btn" id="repPrint" type="button">Save as PDF</button>'+
-      '<span class="hint">Print sheet → Save to Files or Share</span>'+
+      '<button class="btn" id="repPdf" type="button">Download PDF</button>'+
+      '<span class="hint">Saves to Files — no browser header or link</span>'+
     '</div>'+
     '<div class="sub">Delicio · Oman · CPD</div><h1>Store availability check — missing items</h1>'+
     '<div class="meta">'+
@@ -806,7 +997,34 @@ document.getElementById('pdf').addEventListener('click', function(){
   docTitle = docTitle || document.title;
   document.title = 'Delicio missing items - ' + siteScopeLabel() + ' - ' + stamp;
   document.getElementById('repClose').addEventListener('click', closeReport);
-  document.getElementById('repPrint').addEventListener('click', function(){ window.print(); });
+  document.getElementById('repPdf').addEventListener('click', function(){
+    var rows = missing.map(function(i){
+      var it = D.items[i], lp = A.last[i];
+      return [it[2], String(it[0]), it[1],
+              lp < 0 ? '-' : MONTHS[lp%12] + ' ' + (lp < 12 ? '2025' : '2026'),
+              A.v26[i] ? nf0.format(Math.round(A.v26[i])) : '-',
+              A.v25[i] ? nf0.format(Math.round(A.v25[i])) : '-'];
+    });
+    var bytes = reportPdf({
+      period: periodLabel() + ' 2025 vs 2026',
+      meta: [
+        ['Customer / site', scopeNames()],
+        ['Visit date', stamp],
+        ['Checked by', who || '-'],
+        ['Sales period', periodLabel() + ' 2025 vs 2026'],
+        ['Assortment checked', auditRows.length + ' regular items'],
+        ['On shelf', String(found)],
+        ['Missing', String(missing.length)]
+      ]
+    }, rows);
+    var blob = new Blob([bytes], {type:'application/pdf'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'Delicio missing items - ' + siteScopeLabel().replace(/[\\/:*?"<>|]/g,'-') + ' - ' + stamp + '.pdf';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+  });
 });
 var docTitle = '';
 function closeReport(){
