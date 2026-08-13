@@ -28,7 +28,7 @@ body{
 }
 .mono{font-family:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
 .num{font-family:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
-td.d-avgq,th.d-avgq{display:none}
+.nostock{color:var(--neg);font-weight:600}
 .eyebrow{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
 button,select,input{font-family:inherit;font-size:inherit;color:inherit}
 :focus-visible{outline:2px solid var(--accent);outline-offset:1px}
@@ -221,7 +221,7 @@ tr.ok td.desc{color:var(--pos)}
   /* the item table becomes tappable two-line cards */
   #tbl thead{display:none}
   #tbl,#tbl tbody,#tbl tfoot,#tbl tr,#tbl td{display:block}
-  #tbl tbody tr{display:grid;grid-template-columns:42px 1fr 1fr 1fr;gap:4px 8px;
+  #tbl tbody tr{display:grid;grid-template-columns:42px 1fr 1fr 1fr;gap:3px 8px;
     align-items:center;
     border:1px solid var(--line);border-left:3px solid var(--line);border-radius:4px;
     margin:0 0 6px;padding:8px 10px;background:#fff}
@@ -233,20 +233,23 @@ tr.ok td.desc{color:var(--pos)}
   #tbl tbody tr.nsup{background:#FDF4F2}
   #tbl tbody tr.nsup td.d-last{color:var(--neg);font-weight:600}
 
-  /* line 1 — tick + item.  line 2 — the three numbers that matter in-store */
-  #tbl tbody td.chkc{grid-column:1;grid-row:1/span 2;align-self:center;text-align:left}
+  /* line 1 — tick + item.  line 2 — this year's numbers.  line 3 — stock + last supply */
+  #tbl tbody td.chkc{grid-column:1;grid-row:1/span 3;align-self:center;text-align:left}
   #tbl .chk{width:38px;height:38px;font-size:19px;border-width:2px}
   #tbl tbody td.desc{grid-column:2/5;grid-row:1;white-space:normal;max-width:none;
     font-size:13px;font-weight:600;line-height:1.2}
   #tbl tbody td.d-q26{grid-column:2;grid-row:2}
-  #tbl tbody td.d-avgq{display:table-cell;grid-column:3;grid-row:2}
-  #tbl tbody td.d-last{grid-column:4;grid-row:2}
+  #tbl tbody td.d-v26{display:table-cell;grid-column:3;grid-row:2}
+  #tbl tbody td.d-avgq{display:table-cell;grid-column:4;grid-row:2}
+  #tbl tbody td.d-stock{display:table-cell;grid-column:2;grid-row:3}
+  #tbl tbody td.d-last{grid-column:3/5;grid-row:3}
   #tbl tbody td.c-type,#tbl tbody td.c-cat,#tbl tbody td.c-code,
-  #tbl tbody td.d-q25,#tbl tbody td.d-dq,#tbl tbody td.d-v25,
-  #tbl tbody td.d-v26,#tbl tbody td.d-dv,#tbl tbody td.d-delta,
+  #tbl tbody td.d-q25,#tbl tbody td.d-v25,
+  #tbl tbody td.d-dv,#tbl tbody td.d-delta,
   #tbl tbody td.d-avg{display:none!important}
   #tbl tbody td.num{text-align:left}
   #tbl tbody td[data-l]{margin-top:2px;font-size:12.5px}
+  #tbl tbody td.d-stock,#tbl tbody td.d-last{font-size:12px}
   #tbl tbody td[data-l]::before{content:attr(data-l);display:block;
     font-family:'IBM Plex Mono',monospace;font-size:7.5px;letter-spacing:.1em;
     text-transform:uppercase;color:var(--muted);margin-bottom:0}
@@ -454,7 +457,7 @@ var SITES = [], CUSTOMERS = [], sitesByCust = {};
 var YEARS = [], NY = 0, LASTM = 11;
 var F = null;            /* {s,i,p,v,q} typed arrays — the whole dataset, in memory */
 var loadedAt = null;
-var DATA_VERSION = 5;
+var DATA_VERSION = 6;
 
 /* ---------- gviz over JSONP (no CORS, works from a static page) ---------- */
 var gvSeq = 0;
@@ -531,6 +534,7 @@ function snapshotClear(cb){
 function applySnapshot(snap){
   SITES = snap.sites; YEARS = snap.years.slice(); NY = YEARS.length;
   F = snap.f; loadedAt = snap.at;
+  if (snap.stock && snap.stock.length === NI){ STOCK = snap.stock; stockAt = snap.stockAt || null; }
   CUSTOMERS = []; sitesByCust = {};
   var seen = {};
   SITES.forEach(function(r, i){
@@ -711,7 +715,8 @@ function loadAll(progress, ok, fail){
     B = null;
 
     var snap = {version:DATA_VERSION, at:new Date().toISOString(), years:years, sites:sites,
-                f:{s:fs, i:fi, p:fp, v:fv, q:fq}};
+                f:{s:fs, i:fi, p:fp, v:fv, q:fq},
+                stock:STOCK, stockAt:stockAt};
     applySnapshot(snap);
     snapshotSave(snap);
     ok();
@@ -895,6 +900,147 @@ function loadViaGviz(progress, ok, fail){
   }
 }
 
+/* ================= warehouse stock (second tab of the same sheet) =================
+   The tab name is not fixed, so we try the likely ones and detect the columns from
+   the header row. ?stock=TabName or ?stockgid=123 in the URL overrides the search. */
+var STOCK = null;            /* cases on hand, by item index */
+var stockAt = null, stockNote = '';
+
+function stockCandidates(){
+  var out = [];
+  try {
+    var qs = new URLSearchParams(window.location.search);
+    var named = qs.get('stock');
+    if (named) out.push(named);
+  } catch(e){}
+  return out.concat(['Stock','Current Stock','Stock Data','Warehouse Stock','Current Stock ',
+                     'Inventory','Stock on Hand','SOH','Stocks','Sheet2','Sheet 2']);
+}
+function stockGidOverride(){
+  try { return new URLSearchParams(window.location.search).get('stockgid'); } catch(e){ return null; }
+}
+
+/* pick the item-code column and the stock column out of whatever headers exist */
+function detectStockCols(cols){
+  var codeI = -1, stockI = -1, descI = -1;
+  for (var i=0;i<cols.length;i++){
+    var h = String((cols[i] && (cols[i].label || cols[i].id)) || '').trim().toLowerCase();
+    if (!h) continue;
+    if (codeI < 0 && /item\s*(code|no|number)|^code$|^sku$/.test(h)) codeI = i;
+    if (descI < 0 && /desc|item\s*name|product/.test(h)) descI = i;
+    if (stockI < 0 && /stock|soh|on\s*hand|balance|inventory|closing/.test(h)) stockI = i;
+  }
+  if (stockI < 0){
+    for (var j=0;j<cols.length;j++){
+      var h2 = String((cols[j] && (cols[j].label || cols[j].id)) || '').trim().toLowerCase();
+      if (j !== codeI && /qty|quantity|cases|ctn|carton|units/.test(h2)){ stockI = j; break; }
+    }
+  }
+  return {code:codeI, stock:stockI, desc:descI};
+}
+
+function applyStockRows(table){
+  var cols = table.cols || [];
+  var pick = detectStockCols(cols);
+  if (pick.code < 0 || pick.stock < 0) return false;
+  var arr = new Float64Array(NI), hits = 0;
+  for (var r=0;r<table.rows.length;r++){
+    var row = table.rows[r];
+    var codeRaw = cell(row, pick.code);
+    if (codeRaw === null) continue;
+    var ii = imap[typeof codeRaw === 'number' ? Math.round(codeRaw) : cint(codeRaw)];
+    if (ii === undefined) continue;
+    var v = cell(row, pick.stock);
+    arr[ii] += (typeof v === 'number') ? v : cnum(v);
+    hits++;
+  }
+  if (!hits) return false;
+  STOCK = arr; stockAt = new Date().toISOString();
+  stockNote = '';
+  return true;
+}
+
+/* Probe every likely tab at once rather than one after another: each response is a
+   few rows, and a serial walk would stall behind every miss. First hit wins. */
+function rememberedTab(v){
+  try {
+    if (v === undefined) return window.localStorage.getItem('delicio.stocktab');
+    window.localStorage.setItem('delicio.stocktab', v);
+  } catch(e){ return null; }
+}
+function probe(targets, done){
+  var settled = false, pending = targets.length;
+  function finish(okay, hit){
+    if (settled) return;
+    settled = true;
+    done(okay, hit);
+  }
+  if (!pending) return finish(false);
+  targets.forEach(function(t){
+    gvizSheet(t, 'select *',
+      function(table){
+        if (settled) return;
+        if (table && table.rows && table.rows.length && applyStockRows(table)) return finish(true, t);
+        if (--pending === 0) finish(false);
+      },
+      function(){
+        if (settled) return;
+        if (--pending === 0) finish(false);
+      });
+  });
+}
+/* Once we know which tab holds the stock we go straight to it next time; only a
+   first run (or a renamed tab) pays for the full sweep, and that runs in parallel. */
+function loadStock(done){
+  var gid = stockGidOverride(), known = rememberedTab();
+  function sweep(){
+    var targets = [];
+    if (gid) targets.push({gid:gid});
+    stockCandidates().forEach(function(n){
+      if (n !== known) targets.push({sheet:n});
+    });
+    probe(targets, function(okay, hit){
+      if (okay && hit && hit.sheet) rememberedTab(hit.sheet);
+      if (!okay) stockNote = 'Stock tab not found — open the dashboard with ?stock=YourTabName to point at it.';
+      done(okay);
+    });
+  }
+  if (known && !gid){
+    probe([{sheet:known}], function(okay){
+      if (okay) return done(true);
+      sweep();
+    });
+  } else sweep();
+}
+
+/* gviz against a named tab or gid rather than the main data tab */
+function gvizSheet(target, query, ok, fail){
+  var name = '__gs' + (++gvSeq), done = false, s;
+  function cleanup(){
+    try { delete window[name]; } catch(e){ window[name] = undefined; }
+    if (s && s.parentNode) s.parentNode.removeChild(s);
+  }
+  var timer = setTimeout(function(){
+    if (done) return; done = true; cleanup(); fail('timeout');
+  }, 15000);
+  window[name] = function(resp){
+    if (done) return; done = true; clearTimeout(timer); cleanup();
+    if (!resp || resp.status === 'error') return fail('error');
+    ok(resp.table);
+  };
+  s = document.createElement('script');
+  s.src = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz/tq' +
+          '?tqx=out:json;responseHandler:' + name +
+          (target.gid ? '&gid=' + encodeURIComponent(target.gid)
+                      : '&sheet=' + encodeURIComponent(target.sheet)) +
+          '&headers=1&tq=' + encodeURIComponent(query);
+  s.onerror = function(){
+    if (done) return; done = true; clearTimeout(timer); cleanup(); fail('network');
+  };
+  document.head.appendChild(s);
+}
+function stockOf(i){ return STOCK ? STOCK[i] : 0; }
+
 /* ---------- scope: pure client-side masking, never a network call ---------- */
 var mask = null;
 function scopeSites(){
@@ -1073,12 +1219,12 @@ var NEVBG = [0.984, 0.925, 0.910], NEVFG = [0.549, 0.184, 0.118];
 function reportPdf(info, rows){
   var doc = new PdfDoc(), M = doc.M, RIGHT = doc.PW - M, W = RIGHT - M;
   var cols = [
-    {t:'CATEGORY',        w:70},
-    {t:'ITEM CODE',       w:54},
-    {t:'ITEM DESCRIPTION',w:194},
-    {t:'LAST SUPPLIED',   w:80, sm:1},
-    {t:'2026 VALUE',      w:57, a:'r'},
-    {t:'2025 VALUE',      w:57, a:'r'}
+    {t:'CATEGORY',        w:64},
+    {t:'ITEM CODE',       w:52},
+    {t:'ITEM DESCRIPTION',w:172},
+    {t:'LAST SUPPLIED',   w:78},
+    {t:'STOCK',           w:44, a:'r'},
+    {t:(info.yrB || '') + ' VALUE', w:55, a:'r'}
   ];
   var xs = [], acc = M;
   cols.forEach(function(c){ xs.push(acc); acc += c.w; });
@@ -1228,13 +1374,12 @@ function COLS(){
     {k:'desc',  t:'Item Description'},
     {k:'qA',    t:state.yrA + ' QTY', r:1},
     {k:'qB',    t:state.yrB + ' QTY', r:1},
-    {k:'dq',    t:'Change', r:1},
     {k:'vA',    t:state.yrA + ' Value', r:1},
     {k:'vB',    t:state.yrB + ' Value', r:1},
     {k:'dv',    t:'Change', r:1},
     {k:'delta', t:'Value vs ' + state.yrA, r:1},
-    {k:'avg',   t:'Avg ' + String(state.yrB).slice(2) + "'/Mo", r:1},
-    {k:'avgq',  t:'Avg QTY', r:1, hide:1},
+    {k:'avgq',  t:'Avg ' + String(state.yrB).slice(2) + "' QTY/Mo", r:1},
+    {k:'stock', t:'Stock', r:1},
     {k:'last',  t:'Last Supplied'}
   ];
 }
@@ -1243,12 +1388,16 @@ function renderHead(){
   for (var c=0;c<cols.length;c++){
     var col = cols[c];
     if (col.chk){ h += '<th class="chkh" title="Tick items found on shelf">'+col.t+'</th>'; continue; }
-    if (col.hide){ h += '<th class="d-avgq"></th>'; continue; }
     var on = state.sort.key===col.k;
     h += '<th data-k="'+col.k+'" class="'+(col.r?'r ':'')+(on?'sorted':'')+'">'+col.t+
          (on ? ' <span class="ar">'+(state.sort.dir<0?'▼':'▲')+'</span>' : '')+'</th>';
   }
   document.getElementById('hrow').innerHTML = h;
+}
+function stockCell(v){
+  if (!STOCK) return '<span class="dash">–</span>';
+  if (v > 0) return nf0.format(Math.round(v));
+  return '<span class="nostock">0</span>';
 }
 function lastLabel(p){
   if (p < 0) return '<span class="never">NEVER SUPPLIED</span>';
@@ -1269,7 +1418,7 @@ function buildRows(){
       i:i, code:it[0], desc:it[1], cat:it[2], catI:catOf[i], type:it[3], promo:promo,
       qA:qA, qB:qB, dq:(qA? qB/qA-1 : (qB?Infinity:0)),
       vA:vA, vB:vB, dv:(vA? vB/vA-1 : (vB?Infinity:0)),
-      delta:vB-vA, avg:vB/mo, avgq:qB/mo, last:A.last[i]
+      delta:vB-vA, avg:vB/mo, avgq:qB/mo, stock:stockOf(i), last:A.last[i]
     });
   }
   return rows;
@@ -1323,20 +1472,22 @@ function render(){
 
   renderAudit();
 
-  var out = [], lastCat = -1;
+  var out = [], lastCat = -1, rowStock = 0;
+  for (i=0;i<rows.length;i++) rowStock += rows[i].stock;
   function subRow(s){
     return '<tr class="cat"><td class="catname" colspan="5">'+esc(s.name)+' <span class="mono" style="font-weight:400;color:var(--muted);font-size:10px">'+s.n+' SKU</span></td>'+
-      '<td class="num">'+fmtS(s.qA)+'</td><td class="num">'+fmtS(s.qB)+'</td><td class="num">'+pctCell(s.qB,s.qA)+'</td>'+
+      '<td class="num">'+fmtS(s.qA)+'</td><td class="num">'+fmtS(s.qB)+'</td>'+
       '<td class="num">'+fmtS(s.vA)+'</td><td class="num">'+fmtS(s.vB)+'</td><td class="num">'+pctCell(s.vB,s.vA)+'</td>'+
       '<td class="num">'+(s.vB-s.vA>=0?'+':'−')+nf0.format(Math.abs(Math.round(s.vB-s.vA)))+'</td>'+
-      '<td class="num">'+fmtS(s.vB/monthsB())+'</td><td class="d-avgq"></td><td></td></tr>';
+      '<td class="num">'+fmtS(s.qB/monthsB())+'</td>'+
+      '<td class="num d-stock">'+fmtS(s.stock)+'</td><td></td></tr>';
   }
   for (i=0;i<rows.length;i++){
     var r = rows[i];
     if (state.group && r.catI !== lastCat){
       lastCat = r.catI;
-      var sub = {name:r.cat, qA:0,qB:0,vA:0,vB:0,n:0}, j = i;
-      while (j<rows.length && rows[j].catI===lastCat){ sub.qA+=rows[j].qA; sub.qB+=rows[j].qB; sub.vA+=rows[j].vA; sub.vB+=rows[j].vB; sub.n++; j++; }
+      var sub = {name:r.cat, qA:0,qB:0,vA:0,vB:0,stock:0,n:0}, j = i;
+      while (j<rows.length && rows[j].catI===lastCat){ sub.qA+=rows[j].qA; sub.qB+=rows[j].qB; sub.vA+=rows[j].vA; sub.vB+=rows[j].vB; sub.stock+=rows[j].stock; sub.n++; j++; }
       out.push(subRow(sub));
     }
     var stopped = (r.vA || r.qA) && !r.vB && !r.qB;
@@ -1353,24 +1504,24 @@ function render(){
       '<td class="desc" title="'+esc(r.desc)+'">'+esc(r.desc)+'</td>'+
       '<td class="num d-q25" data-l="'+state.yrA+' QTY">'+fmt(r.qA)+'</td>'+
       '<td class="num d-q26" data-l="'+state.yrB+' QTY">'+fmt(r.qB)+'</td>'+
-      '<td class="num d-dq" data-l="QTY change">'+pctCell(r.qB,r.qA)+'</td>'+
       '<td class="num d-v25" data-l="'+state.yrA+' value">'+fmt(r.vA)+'</td>'+
-      '<td class="num d-v26" data-l="'+state.yrB+' value">'+fmt(r.vB)+'</td>'+
+      '<td class="num d-v26" data-l="'+state.yrB+' Value">'+fmt(r.vB)+'</td>'+
       '<td class="num d-dv" data-l="Value change">'+pctCell(r.vB,r.vA)+'</td>'+
       '<td class="num d-delta" data-l="Vs '+state.yrA+'"><span class="'+(r.delta>0?'up':(r.delta<0?'down':'flat'))+'">'+(r.delta>=0?'+':'−')+nf0.format(Math.abs(Math.round(r.delta)))+'</span></td>'+
-      '<td class="num d-avg" data-l="Avg sales">'+fmt(r.avg)+'</td>'+
       '<td class="num d-avgq" data-l="Avg QTY">'+fmt(r.avgq)+'</td>'+
+      '<td class="num d-stock" data-l="Stock">'+stockCell(r.stock)+'</td>'+
       '<td class="d-last" data-l="Last supplied">'+lastLabel(r.last)+'</td></tr>');
   }
   document.getElementById('tbody').innerHTML = out.length ? out.join('') :
-    '<tr><td colspan="15" class="empty">No items match this selection.</td></tr>';
+    '<tr><td colspan="14" class="empty">No items match this selection.</td></tr>';
 
   document.getElementById('tfoot').innerHTML =
     '<tr><td colspan="5">TOTAL — '+rows.length+' items</td>'+
-    '<td class="num">'+fmtS(T.qA)+'</td><td class="num">'+fmtS(T.qB)+'</td><td class="num">'+pctCell(T.qB,T.qA)+'</td>'+
+    '<td class="num">'+fmtS(T.qA)+'</td><td class="num">'+fmtS(T.qB)+'</td>'+
     '<td class="num">'+fmtS(T.vA)+'</td><td class="num">'+fmtS(T.vB)+'</td><td class="num">'+pctCell(T.vB,T.vA)+'</td>'+
     '<td class="num">'+(T.vB-T.vA>=0?'+':'−')+nf0.format(Math.abs(Math.round(T.vB-T.vA)))+'</td>'+
-    '<td class="num">'+fmtS(T.vB/monthsB())+'</td><td class="d-avgq"></td><td></td></tr>';
+    '<td class="num">'+fmtS(T.qB/monthsB())+'</td>'+
+    '<td class="num d-stock">'+fmtS(rowStock)+'</td><td></td></tr>';
 
   document.getElementById('rowCount').textContent =
     rows.length + ' items · ' + siteScopeLabel() + ' · ' + yearsLabel();
@@ -1490,10 +1641,11 @@ document.getElementById('pdf').addEventListener('click', function(){
   }
   var rowsHtml = missing.map(function(i){
     var it = ITEMS[i], lt = lastTxt(A.last[i]);
+    var st = stockOf(i);
     return '<tr'+(lt?'':' class="nev"')+'><td>'+esc(it[2])+'</td><td>'+it[0]+'</td><td>'+esc(it[1])+'</td>'+
       '<td>'+(lt ? lt : '<b>NEVER SUPPLIED</b>')+'</td>'+
-      '<td class="n">'+(A.vB[i]?nf0.format(Math.round(A.vB[i])):'—')+'</td>'+
-      '<td class="n">'+(A.vA[i]?nf0.format(Math.round(A.vA[i])):'—')+'</td></tr>';
+      '<td class="n">'+(STOCK ? (st>0 ? nf0.format(Math.round(st)) : '<b>0</b>') : '—')+'</td>'+
+      '<td class="n">'+(A.vB[i]?nf0.format(Math.round(A.vB[i])):'—')+'</td></tr>';
   }).join('');
   document.getElementById('report').innerHTML =
     '<div class="rep-tools">'+
@@ -1511,15 +1663,17 @@ document.getElementById('pdf').addEventListener('click', function(){
       '<div><span>On shelf</span>'+found+'</div>'+
       '<div><span>Missing</span>'+missing.length+'</div>'+
       '<div><span>Never supplied</span>'+neverN+'</div>'+
+      '<div><span>Warehouse stock</span>'+(STOCK ? 'loaded'+(stockAt ? ' '+new Date(stockAt).toLocaleDateString('en-GB',{day:'2-digit',month:'short'}) : '') : 'not available')+'</div>'+
     '</div>'+
     '<h2>Missing items and last supply</h2>'+
     (missing.length
       ? '<table><thead><tr><th>Category</th><th>Item Code</th><th>Item Description</th><th>Last supplied</th>'+
-        '<th style="text-align:right">'+state.yrB+' Value</th><th style="text-align:right">'+state.yrA+' Value</th></tr></thead><tbody>'+rowsHtml+'</tbody></table>'
+        '<th style="text-align:right">Stock</th><th style="text-align:right">'+state.yrB+' Value</th></tr></thead><tbody>'+rowsHtml+'</tbody></table>'
       : '<p>Every regular item in this assortment was found on shelf.</p>')+
     '<div class="note">Missing = a regular item on the checklist that was not ticked during the visit. '+
     'NEVER SUPPLIED = this customer / site has never been invoiced for the item at all \u2014 a distribution gap rather than an out-of-stock. '+
     'Last supplied is the most recent month with a positive shipment anywhere in the data, whatever period is selected on screen. '+
+    'Stock is cases on hand at the main warehouse — a missing item with stock can be ordered today. '+
     'Promotional packs are excluded from the check, and the data covers CPD only \u2014 Food Service (FSD) is out of scope. '+
     'Values cover '+yearsLabel()+'.</div>';
 
@@ -1532,9 +1686,10 @@ document.getElementById('pdf').addEventListener('click', function(){
   document.getElementById('repPdf').addEventListener('click', function(){
     var rows = missing.map(function(i){
       var it = ITEMS[i], lt = lastTxt(A.last[i]);
+      var st = stockOf(i);
       var row = [it[2], String(it[0]), it[1], lt ? lt : 'NEVER SUPPLIED',
-                 A.vB[i] ? nf0.format(Math.round(A.vB[i])) : '-',
-                 A.vA[i] ? nf0.format(Math.round(A.vA[i])) : '-'];
+                 STOCK ? nf0.format(Math.round(st)) : '-',
+                 A.vB[i] ? nf0.format(Math.round(A.vB[i])) : '-'];
       row.never = !lt;
       return row;
     });
@@ -1549,7 +1704,8 @@ document.getElementById('pdf').addEventListener('click', function(){
         ['Assortment checked', auditRows.length + ' regular items'],
         ['On shelf', String(found)],
         ['Missing', String(missing.length)],
-        ['Never supplied', String(neverN)]
+        ['Never supplied', String(neverN)],
+        ['Stock at warehouse', STOCK ? (stockAt ? 'as of ' + new Date(stockAt).toLocaleDateString('en-GB',{day:'2-digit',month:'short'}) : 'loaded') : 'not available']
       ]
     }, rows);
     var blob = new Blob([bytes], {type:'application/pdf'});
@@ -1754,6 +1910,7 @@ document.getElementById('refreshBtn').addEventListener('click', function(){
   if (!window.confirm('Reload everything from the Google Sheet? Your ticks are kept.')) return;
   showLoader('Refreshing from the sheet…');
   snapshotClear(function(){
+    loadStock(function(){ /* stock first, it is small */ });
     loadAll(setProgress, function(){
       afterLoad(true);
       hideLoader();
@@ -1769,18 +1926,17 @@ document.getElementById('csv').addEventListener('click', function(){
   aggregate();
   var rows = sortRows(buildRows());
   var head = ['Sales Type','Category','Item Code','Store Check','Item Description',
-              state.yrA+' QTY',state.yrB+' QTY','QTY Change %',state.yrA+' Value',state.yrB+' Value',
-              'Value Change %','Value vs '+state.yrA,'Avg Value/Mo','Avg QTY/Mo','Last Supplied'];
+              state.yrA+' QTY',state.yrB+' QTY',state.yrA+' Value',state.yrB+' Value',
+              'Value Change %','Value vs '+state.yrA,'Avg QTY/Mo','Warehouse Stock','Last Supplied'];
   var lines = [head.join(',')];
   rows.forEach(function(r){
-    var pq = r.qA ? (r.qB/r.qA-1)*100 : '';
     var pv = r.vA ? (r.vB/r.vA-1)*100 : '';
     var chk = r.promo ? '' : (state.checked.has(r.i) ? 'On shelf' : 'Missing');
     var lt = r.last < 0 ? 'NEVER SUPPLIED' : (function(){ var o = periodOf(r.last); return MONTHS[o.month]+' '+o.year; })();
     lines.push([r.type, r.cat, r.code, chk, '"'+r.desc.replace(/"/g,'""')+'"',
-      r.qA.toFixed(2), r.qB.toFixed(2), pq===''?'':pq.toFixed(1),
+      r.qA.toFixed(2), r.qB.toFixed(2),
       r.vA.toFixed(2), r.vB.toFixed(2), pv===''?'':pv.toFixed(1),
-      r.delta.toFixed(2), r.avg.toFixed(2), r.avgq.toFixed(2), lt].join(','));
+      r.delta.toFixed(2), r.avgq.toFixed(2), STOCK ? r.stock.toFixed(0) : '', lt].join(','));
   });
   var blob = new Blob([lines.join('\n')], {type:'text/csv;charset=utf-8;'});
   var a = document.createElement('a');
@@ -1812,6 +1968,23 @@ function fail(msg){
     '<button class="btn" onclick="location.reload()">Try again</button>';
 }
 var built = false;
+function saveStockToSnapshot(){
+  snapshotLoad(function(snap){
+    if (!snap) return;
+    snap.stock = STOCK; snap.stockAt = stockAt;
+    snapshotSave(snap);
+  });
+}
+function refreshStock(){
+  loadStock(function(okay){
+    if (okay){
+      saveStockToSnapshot();
+      renderHead(); render();
+    } else if (stockNote){
+      setStatus('stale', stockNote);
+    }
+  });
+}
 function afterLoad(rebuild){
   if (!built){
     buildSelectors();
@@ -1839,10 +2012,19 @@ function boot(){
       applySnapshot(snap);
       afterLoad(false);
       hideLoader();
+      refreshStock();                 /* stock is a few rows — always pull it fresh */
       return;
     }
     showLoader('Reading the sheet…');
-    loadAll(setProgress, function(){ afterLoad(false); hideLoader(); }, fail);
+    loadStock(function(okay){                 /* runs alongside the main download */
+      if (okay && built){ renderHead(); render(); saveStockToSnapshot(); }
+      else if (!okay && built && stockNote) setStatus('stale', stockNote);
+    });
+    loadAll(setProgress, function(){
+      afterLoad(false); hideLoader();
+      if (STOCK) saveStockToSnapshot();
+      else if (stockNote) setStatus('stale', stockNote);
+    }, fail);
   });
 }
 if (window.requestAnimationFrame) requestAnimationFrame(function(){ setTimeout(boot, 20); });
